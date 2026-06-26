@@ -8,27 +8,6 @@ import time
 import threading
 import re
 import os
-from flask import Flask, request, jsonify
-
-# ===== КОНФИГ =====
-TOKEN = os.getenv("TELEGRAM_TOKEN")  # Токен будет из переменных окружения!
-API_KEY = "Tv2GrTBsyJXEBRwgUHmcUY9Gd5KnOgIA9zX5Vn3f3dAkqFgwLefrMdKVATwN"
-ADMIN_ID = 593150935
-BOT_USERNAME = "NekroKrutka_rabot"
-
-# Остальной код бота отсюда...
-# (
-import telebot
-from telebot
-import types
-import sqlite3
-import datetime
-import requests
-import urllib3
-import time
-import threading
-import re
-import os
 import json
 import random
 import string
@@ -41,12 +20,12 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
 
-API_KEY = "Tv2GrTBsyJXEBRWgUHmcUY9Gd5KnOgIA9zX5Vn3f3dAkqFgwLefrMdKVATwN"
+API_KEY = "Tv2GrTBsyJXEBRwgUHmcUY9Gd5KnOgIA9zX5Vn3f3dAkqFgwLefrMdKVATwN"
 API_URL = "https://kuzya-boost.ru/api/v2"
 ADMIN_ID = 593150935
 BOT_USERNAME = "NekroKrutka_rabot"
 CHANNEL_ID = "@repaBotaNakruta"
-CRYPTOBOT_TOKEN = os.getenv("601460:AA18QsM6L3OCxhVM1erKAbGRiLDV5v8ce6Q")  # Токен от CryptoBot API
+CRYPTOBOT_TOKEN = os.getenv("CRYPTOBOT_TOKEN")
 
 if not CRYPTOBOT_TOKEN:
     print("⚠️ CRYPTOBOT_TOKEN не найден! Автопополнение через криптобот не будет работать.")
@@ -76,14 +55,12 @@ def crypto_webhook():
             user_id = int(data.get('user_id'))
             amount_rub = float(data.get('amount_rub'))
             
-            # Обновляем баланс
             conn = sqlite3.connect('bot.db')
             cur = conn.cursor()
             cur.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount_rub, user_id))
             conn.commit()
             conn.close()
             
-            # Уведомляем пользователя
             try:
                 new_balance = get_user_balance(user_id)
                 bot.send_message(
@@ -294,53 +271,7 @@ def init_db():
 
 init_db()
 
-# ===== ФУНКЦИИ ДЛЯ CRYPTOBOT =====
-def create_crypto_invoice(amount_rub, currency, user_id):
-    """Создаёт счёт в CryptoBot через API"""
-    if not CRYPTOBOT_TOKEN:
-        return None
-    
-    # Конвертируем рубли в криптовалюту
-    if currency == "USDT":
-        amount_crypto = amount_rub / 85
-    elif currency == "GRAM":
-        amount_crypto = amount_rub / 140
-    else:
-        return None
-    
-    amount_crypto = round(amount_crypto, 4)
-    
-    try:
-        url = "https://api.cryptobot.app/createInvoice"
-        headers = {
-            'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN,
-            'Content-Type': 'application/json'
-        }
-        payload = {
-            "asset": currency,
-            "amount": amount_crypto,
-            "description": f"Пополнение баланса NekroKrutka на {amount_rub} руб.",
-            "payload": json.dumps({"user_id": user_id, "amount_rub": amount_rub})
-        }
-        
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
-        
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('ok'):
-                return {
-                    'invoice_id': data['result']['invoice_id'],
-                    'pay_url': data['result']['pay_url'],
-                    'amount_crypto': amount_crypto,
-                    'currency': currency
-                }
-        print(f"❌ Ошибка CryptoBot: {response.text}")
-        return None
-    except Exception as e:
-        print(f"❌ Ошибка создания счёта: {e}")
-        return None
-
-# ===== ФУНКЦИИ РАБОТЫ С БД =====
+# ===== ФУНКЦИИ =====
 def get_user_balance(user_id):
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
@@ -833,7 +764,6 @@ def get_main_menu_keyboard(user_id):
 def start(message):
     user_id = message.from_user.id
     
-    # Проверяем чёрный список
     if is_user_blocked(user_id):
         bot.send_message(message.chat.id, "⛔ Ваш аккаунт заблокирован!")
         return
@@ -841,7 +771,6 @@ def start(message):
     print(f"✅ /start от {user_id}")
     username = message.from_user.username or "Неизвестно"
     
-    # Проверяем, есть ли реферальный параметр
     referrer_id = None
     has_ref_param = False
     if len(message.text.split()) > 1:
@@ -859,7 +788,6 @@ def start(message):
     existing = cur.fetchone()
     
     if not existing:
-        # Новый пользователь — регистрация
         discount_expiry = (datetime.datetime.now() + datetime.timedelta(hours=48)).strftime("%Y-%m-%d %H:%M")
         cur.execute('''
             INSERT INTO users (user_id, username, reg_date, referred_by, discount_expiry)
@@ -868,7 +796,6 @@ def start(message):
         conn.commit()
         conn.close()
         
-        # Если есть реферал — показываем капчу
         if referrer_id and referrer_id != user_id:
             markup = types.InlineKeyboardMarkup()
             btn_captcha = types.InlineKeyboardButton("✅ Я человек", callback_data=f"captcha_{referrer_id}")
@@ -881,14 +808,11 @@ def start(message):
             )
             return
         
-        # Если реферала нет — сразу показываем каналы и меню
         show_channels_and_menu(message.chat.id, user_id)
         return
     
-    # Пользователь уже существует
     conn.close()
     
-    # Проверяем капчу, если пользователь пришёл по реф ссылке и не прошёл капчу
     if has_ref_param and not existing[1]:
         markup = types.InlineKeyboardMarkup()
         btn_captcha = types.InlineKeyboardButton("✅ Я человек", callback_data=f"captcha_{referrer_id}")
@@ -901,7 +825,6 @@ def start(message):
         )
         return
     
-    # Обычный старт
     show_channels_and_menu(message.chat.id, user_id)
 
 # ===== КАПЧА =====
@@ -910,14 +833,12 @@ def captcha_handler(call):
     user_id = call.from_user.id
     referrer_id = int(call.data.split("_")[1])
     
-    # Отмечаем, что капча пройдена
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
     cur.execute('UPDATE users SET has_passed_captcha = 1 WHERE user_id = ?', (user_id,))
     conn.commit()
     conn.close()
     
-    # Начисляем монеты рефералу
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
     cur.execute('SELECT user_id FROM users WHERE user_id = ?', (referrer_id,))
@@ -938,8 +859,6 @@ def captcha_handler(call):
     
     bot.answer_callback_query(call.id, "✅ Подтверждено!")
     bot.delete_message(call.message.chat.id, call.message.message_id)
-    
-    # Показываем каналы и меню
     show_channels_and_menu(call.message.chat.id, user_id)
 
 # ===== ПОКАЗ КАНАЛОВ И МЕНЮ =====
@@ -960,107 +879,50 @@ def show_channels_and_menu(chat_id, user_id):
         reply_markup=markup
     )
 
-# ===== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ (ВСЕ КНОПКИ) =====
-# (Здесь весь остальной код, который я уже написал ранее — для экономии места, 
-#  я его не буду дублировать, он должен быть перенесён из твоего текущего файла.
-#  Главное, что все функции ниже должны быть обёрнуты в main_callback_handler
-#  и проверять is_user_blocked() в начале)
+# ===== ОБРАБОТКА CRYPTOBOT =====
+def create_crypto_invoice(amount_rub, currency, user_id):
+    if not CRYPTOBOT_TOKEN:
+        return None
+    
+    if currency == "USDT":
+        amount_crypto = amount_rub / 85
+    elif currency == "GRAM":
+        amount_crypto = amount_rub / 140
+    else:
+        return None
+    
+    amount_crypto = round(amount_crypto, 4)
+    
+    try:
+        url = "https://api.cryptobot.app/createInvoice"
+        headers = {
+            'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN,
+            'Content-Type': 'application/json'
+        }
+        payload = {
+            "asset": currency,
+            "amount": amount_crypto,
+            "description": f"Пополнение баланса NekroKrutka на {amount_rub} руб.",
+            "payload": json.dumps({"user_id": user_id, "amount_rub": amount_rub})
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('ok'):
+                return {
+                    'invoice_id': data['result']['invoice_id'],
+                    'pay_url': data['result']['pay_url'],
+                    'amount_crypto': amount_crypto,
+                    'currency': currency
+                }
+        print(f"❌ Ошибка CryptoBot: {response.text}")
+        return None
+    except Exception as e:
+        print(f"❌ Ошибка создания счёта: {e}")
+        return None
 
-@bot.callback_query_handler(func=lambda call: True)
-def main_callback_handler(call):
-    user_id = call.from_user.id
-    
-    # Проверка чёрного списка
-    if is_user_blocked(user_id) and call.data != "back_to_start":
-        bot.answer_callback_query(call.id, "⛔ Ваш аккаунт заблокирован!")
-        return
-    
-    print(f"📩 Нажата кнопка: {call.data} от {user_id}")
-    
-    # ===== БАЛАНС =====
-    if call.data == "balance":
-        balance = get_user_balance(user_id)
-        coins = get_user_coins(user_id)
-        level = get_user_level(user_id)
-        discount = get_user_discount(user_id)
-        
-        markup = types.InlineKeyboardMarkup()
-        btn_deposit = types.InlineKeyboardButton("💳 Пополнить", callback_data="deposit")
-        markup.add(btn_deposit)
-        
-        bot.answer_callback_query(call.id)
-        bot.edit_message_text(
-            f"💰 **Твой баланс:** {balance:.2f} руб.\n"
-            f"🪙 **Монеты:** {coins}\n"
-            f"📊 **Уровень:** {LEVELS[level]['name']}\n"
-            f"📉 **Скидка:** {discount}%\n\n"
-            f"💳 Для пополнения нажми кнопку ниже.",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown",
-            reply_markup=markup
-        )
-    
-    # ===== ПОПОЛНЕНИЕ =====
-    elif call.data == "deposit":
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        btn_crypto = types.InlineKeyboardButton("💳 CryptoBot", callback_data="deposit_crypto")
-        btn_stars = types.InlineKeyboardButton("⭐️ Звёзды", callback_data="deposit_stars")
-        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="balance")
-        markup.add(btn_crypto, btn_stars, btn_back)
-        
-        bot.answer_callback_query(call.id)
-        bot.edit_message_text(
-            "💳 **Выбери способ пополнения:**",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown",
-            reply_markup=markup
-        )
-    
-    # ===== CRYPTOBOT =====
-    elif call.data == "deposit_crypto":
-        markup = types.InlineKeyboardMarkup()
-        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="deposit")
-        markup.add(btn_back)
-        
-        bot.answer_callback_query(call.id)
-        msg = bot.send_message(
-            call.message.chat.id,
-            "💳 **Пополнение через CryptoBot**\n\n"
-            "💰 Актуальные курсы:\n"
-            "• USDT — 1 USDT = 85 руб\n"
-            "• Gram (GRAM) — 1 GRAM = 140 руб\n\n"
-            "📌 Минимальная сумма: 10 руб\n"
-            "📌 Максимальная сумма: 10000 руб\n\n"
-            "💳 Введите сумму в рублях:",
-            parse_mode="Markdown",
-            reply_markup=markup
-        )
-        bot.register_next_step_handler(msg, process_crypto_deposit)
-    
-    # ===== ЗВЁЗДЫ =====
-    elif call.data == "deposit_stars":
-        markup = types.InlineKeyboardMarkup(row_width=3)
-        btns = [15, 25, 50, 75, 100, 150, 200, 350, 500]
-        for val in btns:
-            markup.add(types.InlineKeyboardButton(f"{val} ⭐️", callback_data=f"stars_{val}"))
-        markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="deposit"))
-        
-        bot.answer_callback_query(call.id)
-        bot.edit_message_text(
-            "⭐️ **Пополнение звёздами**\n\n"
-            "💰 1 звезда = 0.80 руб\n"
-            "📌 Выбери сумму:",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown",
-            reply_markup=markup
-        )
-    
-    # ... и так далее все остальные обработчики кнопок (я их уже писал ранее)
-
-# ===== ОБРАБОТКА CRYPTOBOT ПОПОЛНЕНИЯ =====
 def process_crypto_deposit(message):
     user_id = message.from_user.id
     
@@ -1076,7 +938,6 @@ def process_crypto_deposit(message):
         bot.send_message(message.chat.id, "❌ Введите число!")
         return
     
-    # Выбор валюты
     markup = types.InlineKeyboardMarkup(row_width=2)
     btn_usdt = types.InlineKeyboardButton("💵 USDT", callback_data=f"crypto_usdt_{amount_rub}")
     btn_gram = types.InlineKeyboardButton("🟣 Gram", callback_data=f"crypto_gram_{amount_rub}")
@@ -1097,7 +958,6 @@ def crypto_currency_selected(call):
     currency = data[1]
     amount_rub = float(data[2])
     
-    # Создаём счёт в CryptoBot
     invoice = create_crypto_invoice(amount_rub, currency, user_id)
     
     if not invoice:
@@ -1126,25 +986,151 @@ def crypto_currency_selected(call):
         reply_markup=markup
     )
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("check_payment_"))
-def check_payment(call):
+# ===== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ КНОПОК =====
+@bot.callback_query_handler(func=lambda call: True)
+def main_callback_handler(call):
     user_id = call.from_user.id
-    invoice_id = call.data.split("_")[2]
     
-    # Здесь нужно запросить статус счёта через API CryptoBot
-    # Пока что заглушка — через 10-15 секунд после оплаты сработает webhook
-    bot.answer_callback_query(call.id, "🔄 Проверяем...")
-    bot.send_message(
-        call.message.chat.id,
-        "🔄 Проверка оплаты...\n\n"
-        "Если вы оплатили, баланс пополнится автоматически в течение минуты.\n"
-        "Если оплата не пришла — попробуйте ещё раз."
-    )
+    if is_user_blocked(user_id) and call.data != "back_to_start":
+        bot.answer_callback_query(call.id, "⛔ Ваш аккаунт заблокирован!")
+        return
+    
+    print(f"📩 Нажата кнопка: {call.data} от {user_id}")
+    
+    if call.data == "balance":
+        balance = get_user_balance(user_id)
+        coins = get_user_coins(user_id)
+        level = get_user_level(user_id)
+        discount = get_user_discount(user_id)
+        
+        markup = types.InlineKeyboardMarkup()
+        btn_deposit = types.InlineKeyboardButton("💳 Пополнить", callback_data="deposit")
+        markup.add(btn_deposit)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            f"💰 **Твой баланс:** {balance:.2f} руб.\n"
+            f"🪙 **Монеты:** {coins}\n"
+            f"📊 **Уровень:** {LEVELS[level]['name']}\n"
+            f"📉 **Скидка:** {discount}%\n\n"
+            f"💳 Для пополнения нажми кнопку ниже.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data == "deposit":
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        btn_crypto = types.InlineKeyboardButton("💳 CryptoBot", callback_data="deposit_crypto")
+        btn_stars = types.InlineKeyboardButton("⭐️ Звёзды", callback_data="deposit_stars")
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="balance")
+        markup.add(btn_crypto, btn_stars, btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "💳 **Выбери способ пополнения:**",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data == "deposit_crypto":
+        markup = types.InlineKeyboardMarkup()
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="deposit")
+        markup.add(btn_back)
+        
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(
+            call.message.chat.id,
+            "💳 **Пополнение через CryptoBot**\n\n"
+            "💰 Актуальные курсы:\n"
+            "• USDT — 1 USDT = 85 руб\n"
+            "• Gram (GRAM) — 1 GRAM = 140 руб\n\n"
+            "📌 Минимальная сумма: 10 руб\n"
+            "📌 Максимальная сумма: 10000 руб\n\n"
+            "💳 Введите сумму в рублях:",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.register_next_step_handler(msg, process_crypto_deposit)
+    
+    elif call.data == "deposit_stars":
+        markup = types.InlineKeyboardMarkup(row_width=3)
+        btns = [15, 25, 50, 75, 100, 150, 200, 350, 500]
+        for val in btns:
+            markup.add(types.InlineKeyboardButton(f"{val} ⭐️", callback_data=f"stars_{val}"))
+        markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="deposit"))
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "⭐️ **Пополнение звёздами**\n\n"
+            "💰 1 звезда = 0.80 руб\n"
+            "📌 Выбери сумму:",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data.startswith("stars_"):
+        stars = call.data.split("_")[1]
+        markup = types.InlineKeyboardMarkup()
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="deposit_stars")
+        markup.add(btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            f"⭐️ **Скиньте {stars} звёзд админу @nekrophoros**\n\n"
+            f"✅ После получения звёзд баланс будет пополнен!",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data == "buy_menu":
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        btn_tg = types.InlineKeyboardButton("✈️ Telegram", callback_data="platform_telegram")
+        btn_tt = types.InlineKeyboardButton("📱 TikTok", callback_data="platform_tiktok")
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+        markup.add(btn_tg, btn_tt, btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "🛒 **Выбери платформу:**",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data == "back_to_start":
+        back_to_start(call)
+    
+    else:
+        bot.answer_callback_query(call.id, "⚠️ Эта функция временно недоступна")
 
-# ===== ОСТАЛЬНЫЕ ФУНКЦИИ =====
-# (Здесь все остальные функции: история, рефилл, отзывы, рефералка, промокоды, админка, 
-#  настройки, и т.д. — их я уже писал ранее, они остаются без изменений.
-#  Нужно только добавить проверки is_user_blocked() и обработку капчи.)
+# ===== НАЗАД В ГЛАВНОЕ МЕНЮ =====
+def back_to_start(call):
+    user_id = call.from_user.id
+    
+    markup = get_main_menu_keyboard(user_id)
+    text = "🏠 **Главное меню**"
+    
+    try:
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
 
 # ===== СТРУКТУРА УСЛУГ =====
 SERVICES = {
@@ -1212,7 +1198,7 @@ SERVICES = {
     }
 }
 
-# ===== ЗАПУСК БОТА =====
+# ===== ЗАПУСК =====
 if __name__ == "__main__":
     import threading
     
@@ -1221,25 +1207,9 @@ if __name__ == "__main__":
     print(f"📱 Бот: @{BOT_USERNAME}")
     print(f"📢 Канал: {CHANNEL_ID}")
     
-    # Запускаем мониторинг
     monitor_thread = threading.Thread(target=check_orders_status, daemon=True)
     monitor_thread.start()
     print("🔄 Мониторинг статусов запущен!")
-    
-    # Запускаем Flask для webhook
-    port = int(os.environ.get("PORT", 5000))
-    flask_app.run(host='0.0.0.0', port=port))
-# ===== ЗАПУСК =====
-if __name__ == "__main__":
-    # ... твой код запуска бота ...
-    
-    # Запускаем Flask для webhook
-    from flask import Flask
-    flask_app = Flask(__name__)
-    
-    @flask_app.route('/')
-    def index():
-        return "🤖 Бот работает!"
     
     port = int(os.environ.get("PORT", 5000))
     flask_app.run(host='0.0.0.0', port=port)
