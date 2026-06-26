@@ -12,7 +12,7 @@ from flask import Flask, request, jsonify
 
 # ===== КОНФИГ =====
 TOKEN = os.getenv("TELEGRAM_TOKEN")  # Токен будет из переменных окружения!
-API_KEY= "Tv2GrTBsyJXEBRWgUHmcUY9Gd5KnOgIA9zX5Vn3f3dAkqFgwLefrMdKVATwN""
+API_KEY = "Tv2GrTBsyJXEBRwgUHmcUY9Gd5KnOgIA9zX5Vn3f3dAkqFgwLefrMdKVATwN"
 ADMIN_ID = 593150935
 BOT_USERNAME = "NekroKrutka_rabot"
 
