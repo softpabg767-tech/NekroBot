@@ -13,13 +13,10 @@ import random
 import string
 from flask import Flask, request, jsonify
 
-# ==================================================
-# 1. ОТКЛЮЧАЕМ SSL ПРЕДУПРЕЖДЕНИЯ
-# ==================================================
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ==================================================
-# 2. КОНФИГУРАЦИЯ (ВСЁ В ПЕРЕМЕННЫХ ОКРУЖЕНИЯ)
+# 1. КОНФИГ
 # ==================================================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
@@ -30,18 +27,17 @@ API_URL = "https://kuzya-boost.ru/api/v2"
 ADMIN_ID = 593150935
 BOT_USERNAME = "NekroKrutka_rabot"
 CHANNEL_ID = "@repaBotaNakruta"
-
-# Ключ для криптобота (будет тянуться из окружения)
 CRYPTOBOT_TOKEN = os.getenv("CRYPTOBOT_TOKEN")
 
 bot = telebot.TeleBot(TOKEN)
 session = requests.Session()
 session.verify = False
 session.headers.update({'User-Agent': 'Mozilla/5.0'})
+
 print("✅ Бот инициализирован")
 
 # ==================================================
-# 3. FLASK-ПРИЛОЖЕНИЕ (ОТВЕЧАЕТ ЗА ВЕБХУКИ)
+# 2. FLASK (ВЕБХУКИ)
 # ==================================================
 flask_app = Flask(__name__)
 
@@ -49,81 +45,47 @@ flask_app = Flask(__name__)
 def index():
     return "🤖 Бот NekroKrutka работает!"
 
-# ВЕБХУК ДЛЯ ТЕЛЕГРАМ
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
     try:
         json_data = request.get_json()
-        if not json_data:
-            return jsonify({'status': 'error', 'message': 'No data'}), 400
-        
         update = telebot.types.Update.de_json(json_data)
         if update:
             bot.process_new_updates([update])
         return jsonify({'status': 'ok'}), 200
     except Exception as e:
-        print(f"❌ Ошибка webhook Telegram: {e}")
+        print(f"❌ Ошибка webhook: {e}")
         return jsonify({'status': 'error'}), 500
 
-# ВЕБХУК ДЛЯ CRYPTOBOT (АВТОМАТИЧЕСКОЕ ПОПОЛНЕНИЕ)
 @flask_app.route('/crypto_webhook', methods=['POST'])
 def crypto_webhook():
     try:
         data = request.get_json()
-        if not data:
-            return jsonify({'status': 'error', 'message': 'No data'}), 400
-        
-        print(f"📩 CryptoBot Webhook: {data}")
-        
         if data.get('status') == 'paid':
-            payload = data.get('payload', {})
-            if isinstance(payload, str):
-                try:
-                    payload = json.loads(payload)
-                except:
-                    payload = {}
-            
+            payload = json.loads(data.get('payload', '{}'))
             user_id = int(payload.get('user_id'))
             amount_rub = float(payload.get('amount_rub'))
             
-            # Начисляем деньги
             conn = sqlite3.connect('bot.db')
             cur = conn.cursor()
             cur.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount_rub, user_id))
             conn.commit()
             conn.close()
             
-            # Уведомляем пользователя
             try:
                 new_balance = get_user_balance(user_id)
-                bot.send_message(
-                    user_id,
-                    f"✅ **Пополнение успешно!**\n\n"
-                    f"💰 Сумма: {amount_rub:.2f} руб.\n"
-                    f"📊 Новый баланс: {new_balance:.2f} руб."
-                )
-            except Exception as e:
-                print(f"⚠️ Не удалось уведомить пользователя: {e}")
-            
+                bot.send_message(user_id, f"✅ Пополнение на {amount_rub} руб. успешно! Новый баланс: {new_balance:.2f} руб.")
+            except:
+                pass
             return jsonify({'status': 'ok'}), 200
-        
         return jsonify({'status': 'ignored'}), 200
     except Exception as e:
-        print(f"❌ Ошибка CryptoBot webhook: {e}")
+        print(f"❌ Ошибка crypto_webhook: {e}")
         return jsonify({'status': 'error'}), 500
 
 # ==================================================
-# 4. БАЗА ДАННЫХ И ОСНОВНЫЕ ФУНКЦИИ
+# 3. БАЗА ДАННЫХ
 # ==================================================
-
-# СИСТЕМА УРОВНЕЙ
-LEVELS = {
-    "novice": {"name": "🟢 Новичок", "discount": 0, "spent_required": 0},
-    "advanced": {"name": "🟡 Продвинутый", "discount": 3.5, "spent_required": 50},
-    "vip": {"name": "🔴 VIP", "discount": 5, "spent_required": 150},
-    "reseller": {"name": "⚫ Реселлер", "discount": 10, "spent_required": 0}
-}
-
 def init_db():
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
@@ -142,7 +104,8 @@ def init_db():
             total_spent REAL DEFAULT 0,
             is_reseller INTEGER DEFAULT 0,
             is_blocked INTEGER DEFAULT 0,
-            has_passed_captcha INTEGER DEFAULT 0
+            has_passed_captcha INTEGER DEFAULT 0,
+            settings TEXT DEFAULT '{"lang":"ru","notifications":1}'
         )
     ''')
     
@@ -224,7 +187,6 @@ def init_db():
     ''')
     
     cur.execute('INSERT OR IGNORE INTO review_counter (id, counter) VALUES (1, 0)')
-    
     conn.commit()
     conn.close()
     print("✅ База данных готова")
@@ -232,9 +194,8 @@ def init_db():
 init_db()
 
 # ==================================================
-# 5. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (БАЛАНСЫ, ЦЕНЫ, API)
+# 4. ОСНОВНЫЕ ФУНКЦИИ
 # ==================================================
-
 def get_user_balance(user_id):
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
@@ -265,8 +226,7 @@ def get_user_level(user_id):
     
     if is_reseller == 1:
         return "reseller"
-    
-    if total_spent >= 150:
+    elif total_spent >= 150:
         return "vip"
     elif total_spent >= 50:
         return "advanced"
@@ -274,8 +234,42 @@ def get_user_level(user_id):
         return "novice"
 
 def get_user_discount(user_id):
-    level = get_user_level(user_id)
-    return LEVELS[level]["discount"]
+    levels = {
+        "novice": 0,
+        "advanced": 3.5,
+        "vip": 5,
+        "reseller": 10
+    }
+    return levels.get(get_user_level(user_id), 0)
+
+def is_user_blocked(user_id):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('SELECT is_blocked FROM users WHERE user_id = ?', (user_id,))
+    result = cur.fetchone()
+    conn.close()
+    return result[0] == 1 if result else False
+
+def block_user(user_id):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('UPDATE users SET is_blocked = 1 WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def unblock_user(user_id):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('UPDATE users SET is_blocked = 0 WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def set_reseller_status(user_id, value):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('UPDATE users SET is_reseller = ? WHERE user_id = ?', (value, user_id))
+    conn.commit()
+    conn.close()
 
 def get_service_price(service_id):
     try:
@@ -294,17 +288,8 @@ def get_service_price_with_markup(service_id):
     price = get_service_price(service_id)
     if price is None:
         return None
-    return price + get_markup(price)
-
-def get_markup(price):
-    if price < 5:
-        return 10
-    elif price < 20:
-        return 20
-    elif price < 50:
-        return 30
-    else:
-        return 50
+    markup = 10 if price < 5 else 20 if price < 20 else 30 if price < 50 else 50
+    return price + markup
 
 def create_order_api(service_id, link, quantity):
     try:
@@ -424,17 +409,19 @@ def get_refillable_orders(user_id):
 def get_ref_link(user_id):
     return f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
 
+def get_next_review_number():
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('UPDATE review_counter SET counter = counter + 1 WHERE id = 1')
+    cur.execute('SELECT counter FROM review_counter WHERE id = 1')
+    result = cur.fetchone()
+    conn.commit()
+    conn.close()
+    return result[0] if result else 1
+
 def send_review_to_channel(username, user_id, rating, review_text):
     try:
-        conn = sqlite3.connect('bot.db')
-        cur = conn.cursor()
-        cur.execute('UPDATE review_counter SET counter = counter + 1 WHERE id = 1')
-        cur.execute('SELECT counter FROM review_counter WHERE id = 1')
-        result = cur.fetchone()
-        review_number = result[0] if result else 1
-        conn.commit()
-        conn.close()
-        
+        review_number = get_next_review_number()
         date = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
         text = (
             f"⭐️ **Отзыв #{review_number}**\n\n"
@@ -443,45 +430,200 @@ def send_review_to_channel(username, user_id, rating, review_text):
             f"📝 {review_text}\n\n"
             f"📅 {date}"
         )
-        
         bot.send_message(CHANNEL_ID, text, parse_mode="Markdown")
         return True
     except Exception as e:
         print(f"Ошибка отправки в канал: {e}")
         return False
 
-def is_user_blocked(user_id):
+def get_referral_stats(user_id):
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
-    cur.execute('SELECT is_blocked FROM users WHERE user_id = ?', (user_id,))
+    cur.execute('SELECT COUNT(*) FROM referrals WHERE referrer_id = ?', (user_id,))
+    count = cur.fetchone()[0]
+    cur.execute('''
+        SELECT referee_id, date 
+        FROM referrals 
+        WHERE referrer_id = ? 
+        ORDER BY date DESC
+    ''', (user_id,))
+    referrals = cur.fetchall()
+    conn.close()
+    return count, referrals
+
+def generate_promo_code():
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
+
+def get_promo_code(code):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('''
+        SELECT id, code, bonus_type, bonus_amount, max_uses, used_count, expires_at, is_active
+        FROM promocodes 
+        WHERE code = ? AND is_active = 1
+    ''', (code,))
     result = cur.fetchone()
     conn.close()
-    return result[0] == 1 if result else False
+    return result
 
-def block_user(user_id):
+def create_promo_code(code, bonus_type, bonus_amount, max_uses, expires_at=None):
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
-    cur.execute('UPDATE users SET is_blocked = 1 WHERE user_id = ?', (user_id,))
+    try:
+        cur.execute('''
+            INSERT INTO promocodes (code, bonus_type, bonus_amount, max_uses, expires_at, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (code, bonus_type, bonus_amount, max_uses, expires_at, ADMIN_ID, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+
+def use_promo_code(code, user_id):
+    promo = get_promo_code(code)
+    if not promo:
+        return {'success': False, 'message': '❌ Промокод не найден или неактивен!'}
+    
+    promo_id, promo_code, bonus_type, bonus_amount, max_uses, used_count, expires_at, is_active = promo
+    
+    if expires_at:
+        try:
+            expiry = datetime.datetime.strptime(expires_at, "%Y-%m-%d %H:%M")
+            if expiry < datetime.datetime.now():
+                return {'success': False, 'message': '❌ Срок действия промокода истёк!'}
+        except:
+            pass
+    
+    if max_uses > 0 and used_count >= max_uses:
+        return {'success': False, 'message': '❌ Промокод уже использован максимальное количество раз!'}
+    
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('SELECT id FROM promocode_uses WHERE promo_id = ? AND user_id = ?', (promo_id, user_id))
+    if cur.fetchone():
+        conn.close()
+        return {'success': False, 'message': '❌ Вы уже использовали этот промокод!'}
+    
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    
+    if bonus_type == 'rubles':
+        cur.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (bonus_amount, user_id))
+        bonus_text = f"{bonus_amount:.2f} руб."
+    elif bonus_type == 'coins':
+        cur.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (bonus_amount, user_id))
+        bonus_text = f"{bonus_amount} монет"
+    elif bonus_type == 'discount':
+        cur.execute('UPDATE users SET pending_discount = ? WHERE user_id = ?', (bonus_amount, user_id))
+        bonus_text = f"{bonus_amount}% скидка на следующий заказ"
+    else:
+        conn.close()
+        return {'success': False, 'message': '❌ Неизвестный тип бонуса!'}
+    
+    cur.execute('UPDATE promocodes SET used_count = used_count + 1 WHERE id = ?', (promo_id,))
+    cur.execute('INSERT INTO promocode_uses (promo_id, user_id, used_at) VALUES (?, ?, ?)',
+                (promo_id, user_id, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
+    conn.commit()
+    conn.close()
+    
+    return {'success': True, 'message': f'✅ Промокод активирован!\n\n🎁 Бонус: {bonus_text}'}
+
+def deactivate_promo_code(promo_id):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('UPDATE promocodes SET is_active = 0 WHERE id = ?', (promo_id,))
     conn.commit()
     conn.close()
 
-def unblock_user(user_id):
+def get_all_promocodes():
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
-    cur.execute('UPDATE users SET is_blocked = 0 WHERE user_id = ?', (user_id,))
+    cur.execute('''
+        SELECT id, code, bonus_type, bonus_amount, max_uses, used_count, expires_at, is_active
+        FROM promocodes 
+        ORDER BY id DESC
+    ''')
+    result = cur.fetchall()
+    conn.close()
+    return result
+
+def get_all_users(page=0, per_page=10):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    offset = page * per_page
+    cur.execute('''
+        SELECT user_id, username, balance, coins, total_spent, reg_date, is_blocked 
+        FROM users 
+        ORDER BY reg_date DESC 
+        LIMIT ? OFFSET ?
+    ''', (per_page, offset))
+    users = cur.fetchall()
+    cur.execute('SELECT COUNT(*) FROM users')
+    total = cur.fetchone()[0]
+    conn.close()
+    return users, total
+
+def get_all_orders(page=0, per_page=10):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    offset = page * per_page
+    cur.execute('''
+        SELECT id, user_id, service_name, quantity, price, status, date, order_id
+        FROM orders 
+        ORDER BY id DESC 
+        LIMIT ? OFFSET ?
+    ''', (per_page, offset))
+    orders = cur.fetchall()
+    cur.execute('SELECT COUNT(*) FROM orders')
+    total = cur.fetchone()[0]
+    conn.close()
+    return orders, total
+
+def get_pending_reviews():
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('SELECT id, user_id, username, rating, review_text, date FROM reviews WHERE is_approved = 0')
+    reviews = cur.fetchall()
+    conn.close()
+    return reviews
+
+def approve_review(review_id):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('SELECT user_id, username, rating, review_text FROM reviews WHERE id = ?', (review_id,))
+    review = cur.fetchone()
+    if review:
+        user_id, username, rating, review_text = review
+        send_review_to_channel(username, user_id, rating, review_text)
+        cur.execute('UPDATE reviews SET is_approved = 1 WHERE id = ?', (review_id,))
+        conn.commit()
+        conn.close()
+        return True
+    conn.close()
+    return False
+
+def decline_review(review_id):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('DELETE FROM reviews WHERE id = ?', (review_id,))
     conn.commit()
     conn.close()
 
-def set_reseller_status(user_id, value):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('UPDATE users SET is_reseller = ? WHERE user_id = ?', (value, user_id))
-    conn.commit()
-    conn.close()
+def get_service_category_path(service_id):
+    for platform_name, platform in SERVICES.items():
+        for category_name, category in platform["categories"].items():
+            for subcategory_name, services in category.items():
+                for service in services:
+                    if service["id"] == service_id:
+                        return {
+                            'platform': platform['name'],
+                            'category': category_name,
+                            'subcategory': subcategory_name
+                        }
+    return None
 
-# ==================================================
-# 6. МОНИТОРИНГ СТАТУСОВ ЗАКАЗОВ (ФОНОВЫЙ ПОТОК)
-# ==================================================
 def check_orders_status():
     while True:
         try:
@@ -527,7 +669,7 @@ def check_orders_status():
         time.sleep(60)
 
 # ==================================================
-# 7. СТРУКТУРА УСЛУГ
+# 5. СТРУКТУРА УСЛУГ
 # ==================================================
 SERVICES = {
     "telegram": {
@@ -595,7 +737,7 @@ SERVICES = {
 }
 
 # ==================================================
-# 8. ГЛАВНОЕ МЕНЮ
+# 6. ГЛАВНОЕ МЕНЮ
 # ==================================================
 def get_main_menu_keyboard(user_id):
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -618,7 +760,7 @@ def get_main_menu_keyboard(user_id):
     return markup
 
 # ==================================================
-# 9. ОБРАБОТЧИКИ КНОПОК (ВЕСЬ ФУНКЦИОНАЛ)
+# 7. ОБРАБОТЧИКИ КНОПОК
 # ==================================================
 @bot.callback_query_handler(func=lambda call: True)
 def main_callback_handler(call):
@@ -630,7 +772,7 @@ def main_callback_handler(call):
     
     print(f"📩 Нажата кнопка: {call.data} от {user_id}")
     
-    # БАЛАНС
+    # ----- БАЛАНС -----
     if call.data == "balance":
         balance = get_user_balance(user_id)
         coins = get_user_coins(user_id)
@@ -645,7 +787,7 @@ def main_callback_handler(call):
         bot.edit_message_text(
             f"💰 **Твой баланс:** {balance:.2f} руб.\n"
             f"🪙 **Монеты:** {coins}\n"
-            f"📊 **Уровень:** {LEVELS[level]['name']}\n"
+            f"📊 **Уровень:** {level}\n"
             f"📉 **Скидка:** {discount}%\n\n"
             f"💳 Для пополнения нажми кнопку ниже.",
             call.message.chat.id,
@@ -654,7 +796,7 @@ def main_callback_handler(call):
             reply_markup=markup
         )
     
-    # ПОПОЛНЕНИЕ
+    # ----- ПОПОЛНЕНИЕ -----
     elif call.data == "deposit":
         markup = types.InlineKeyboardMarkup(row_width=2)
         btn_crypto = types.InlineKeyboardButton("💳 CryptoBot", callback_data="deposit_crypto")
@@ -671,7 +813,6 @@ def main_callback_handler(call):
             reply_markup=markup
         )
     
-    # CRYPTOBOT
     elif call.data == "deposit_crypto":
         markup = types.InlineKeyboardMarkup()
         btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="deposit")
@@ -692,7 +833,6 @@ def main_callback_handler(call):
         )
         bot.register_next_step_handler(msg, process_crypto_deposit)
     
-    # ЗВЁЗДЫ
     elif call.data == "deposit_stars":
         markup = types.InlineKeyboardMarkup(row_width=3)
         btns = [15, 25, 50, 75, 100, 150, 200, 350, 500]
@@ -727,7 +867,7 @@ def main_callback_handler(call):
             reply_markup=markup
         )
     
-    # КУПИТЬ НАКРУТКУ
+    # ----- КУПИТЬ НАКРУТКУ -----
     elif call.data == "buy_menu":
         markup = types.InlineKeyboardMarkup(row_width=2)
         btn_tg = types.InlineKeyboardButton("✈️ Telegram", callback_data="platform_telegram")
@@ -822,8 +962,6 @@ def main_callback_handler(call):
     
     elif call.data.startswith("service_"):
         service_id = int(call.data.split("_")[1])
-        user_id = call.from_user.id
-        
         service_name = get_service_name_by_id(service_id)
         price_with_markup = get_service_price_with_markup(service_id)
         category_path = get_service_category_path(service_id)
@@ -866,9 +1004,7 @@ def main_callback_handler(call):
         )
     
     elif call.data.startswith("buy_service_"):
-        user_id = call.from_user.id
         service_id = int(call.data.split("_")[2])
-        
         if not hasattr(bot, 'temp_data') or user_id not in bot.temp_data:
             bot.temp_data[user_id] = {"service_id": service_id}
         
@@ -885,14 +1021,12 @@ def main_callback_handler(call):
         bot.register_next_step_handler(msg, process_quantity)
     
     elif call.data == "back_to_services":
-        user_id = call.from_user.id
         if hasattr(bot, 'temp_data') and user_id in bot.temp_data:
             del bot.temp_data[user_id]
-        
         bot.answer_callback_query(call.id)
         buy_menu(call)
     
-    # ИСТОРИЯ
+    # ----- ИСТОРИЯ -----
     elif call.data == "history":
         conn = sqlite3.connect('bot.db')
         cur = conn.cursor()
@@ -936,7 +1070,7 @@ def main_callback_handler(call):
             reply_markup=markup
         )
     
-    # РЕФИЛЛ
+    # ----- РЕФИЛЛ -----
     elif call.data == "refill":
         refillable_orders = get_refillable_orders(user_id)
         refill_info = "ℹ️ Рефилл доступен только если с момента выполнения заказа прошло 24 часа ⏳ и услуга была с гарантией 🛡️\n\n"
@@ -1003,7 +1137,7 @@ def main_callback_handler(call):
             parse_mode="Markdown"
         )
     
-    # ОТЗЫВЫ
+    # ----- ОТЗЫВЫ -----
     elif call.data == "reviews_menu":
         markup = types.InlineKeyboardMarkup(row_width=2)
         btn_add = types.InlineKeyboardButton("✏️ Оставить отзыв", callback_data="review_add")
@@ -1063,7 +1197,7 @@ def main_callback_handler(call):
         bot.answer_callback_query(call.id)
         bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
     
-    # ПОМОЩЬ
+    # ----- ПОМОЩЬ -----
     elif call.data == "help":
         markup = types.InlineKeyboardMarkup()
         btn_admin = types.InlineKeyboardButton("📞 Вызвать админа", callback_data="call_admin")
@@ -1095,22 +1229,10 @@ def main_callback_handler(call):
             call.message.message_id
         )
     
-    # РЕФЕРАЛКА
+    # ----- РЕФЕРАЛКА -----
     elif call.data == "ref_program":
         coins = get_user_coins(user_id)
-        conn = sqlite3.connect('bot.db')
-        cur = conn.cursor()
-        cur.execute('SELECT COUNT(*) FROM referrals WHERE referrer_id = ?', (user_id,))
-        count = cur.fetchone()[0]
-        cur.execute('''
-            SELECT referee_id, date 
-            FROM referrals 
-            WHERE referrer_id = ? 
-            ORDER BY date DESC
-        ''', (user_id,))
-        referrals = cur.fetchall()
-        conn.close()
-        
+        count, referrals = get_referral_stats(user_id)
         ref_link = get_ref_link(user_id)
         
         text = f"👥 **Реферальная программа**\n\n"
@@ -1172,15 +1294,9 @@ def main_callback_handler(call):
             reply_markup=markup
         )
     
-    # ОБМЕН МОНЕТ
+    # ----- ОБМЕН МОНЕТ -----
     elif call.data == "coins_shop":
         coins = get_user_coins(user_id)
-        
-        text = f"🪙 **Обмен монет**\n\n"
-        text += f"💰 У вас: **{coins} монет**\n\n"
-        text += "📦 **Доступные товары (ГАРАНТИИ НЕТ):**\n"
-        
-        markup = types.InlineKeyboardMarkup(row_width=1)
         
         COINS_SHOP = {
             "telegram_subscribers": {
@@ -1220,12 +1336,16 @@ def main_callback_handler(call):
             }
         }
         
+        text = f"🪙 **Обмен монет**\n\n"
+        text += f"💰 У вас: **{coins} монет**\n\n"
+        text += "📦 **Доступные товары (ГАРАНТИИ НЕТ):**\n"
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
         for key, item in COINS_SHOP.items():
             text += f"\n• **{item['name']}**\n"
             text += f"  📊 {item['description']}\n"
             text += f"  🪙 {item['coins']} монет\n"
             text += f"  ⚠️ Гарантии НЕТ\n"
-            
             btn = types.InlineKeyboardButton(
                 f"🛒 {item['name']} - {item['coins']} монет",
                 callback_data=f"coin_buy_{key}"
@@ -1324,7 +1444,7 @@ def main_callback_handler(call):
         
         bot.register_next_step_handler(msg, process_coin_link)
     
-    # ПРОМОКОДЫ
+    # ----- ПРОМОКОДЫ -----
     elif call.data == "promo_menu":
         markup = types.InlineKeyboardMarkup()
         btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
@@ -1341,7 +1461,110 @@ def main_callback_handler(call):
         )
         bot.register_next_step_handler(msg, process_promo_code)
     
-    # АДМИНКА
+    # ----- НАСТРОЙКИ -----
+    elif call.data == "settings_menu":
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('SELECT settings FROM users WHERE user_id = ?', (user_id,))
+        result = cur.fetchone()
+        conn.close()
+        
+        if result:
+            try:
+                settings = json.loads(result[0])
+            except:
+                settings = {"lang": "ru", "notifications": 1}
+        else:
+            settings = {"lang": "ru", "notifications": 1}
+        
+        lang = "🇷🇺 Русский" if settings.get("lang") == "ru" else "🇺🇸 English"
+        notif = "🔔 Включены" if settings.get("notifications") == 1 else "🔕 Отключены"
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        btn_lang = types.InlineKeyboardButton(f"🌐 Язык: {lang}", callback_data="settings_lang")
+        btn_notif = types.InlineKeyboardButton(f"🔔 Уведомления: {notif}", callback_data="settings_notif")
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+        markup.add(btn_lang, btn_notif, btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "⚙️ **Настройки**\n\nВыбери параметр для изменения:",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data == "settings_lang":
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('SELECT settings FROM users WHERE user_id = ?', (user_id,))
+        result = cur.fetchone()
+        conn.close()
+        
+        try:
+            settings = json.loads(result[0]) if result else {}
+        except:
+            settings = {}
+        
+        current_lang = settings.get("lang", "ru")
+        new_lang = "en" if current_lang == "ru" else "ru"
+        settings["lang"] = new_lang
+        
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('UPDATE users SET settings = ? WHERE user_id = ?', (json.dumps(settings), user_id))
+        conn.commit()
+        conn.close()
+        
+        bot.answer_callback_query(call.id, f"✅ Язык изменён на {'Английский' if new_lang == 'en' else 'Русский'}")
+        # Возвращаемся в настройки
+        settings_menu = types.InlineKeyboardMarkup()
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="settings_menu")
+        settings_menu.add(btn_back)
+        bot.edit_message_text(
+            "⚙️ **Настройки**\n\nЯзык изменён!",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=settings_menu
+        )
+    
+    elif call.data == "settings_notif":
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('SELECT settings FROM users WHERE user_id = ?', (user_id,))
+        result = cur.fetchone()
+        conn.close()
+        
+        try:
+            settings = json.loads(result[0]) if result else {}
+        except:
+            settings = {}
+        
+        current_notif = settings.get("notifications", 1)
+        new_notif = 0 if current_notif == 1 else 1
+        settings["notifications"] = new_notif
+        
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('UPDATE users SET settings = ? WHERE user_id = ?', (json.dumps(settings), user_id))
+        conn.commit()
+        conn.close()
+        
+        bot.answer_callback_query(call.id, f"✅ Уведомления {'включены' if new_notif == 1 else 'отключены'}")
+        settings_menu = types.InlineKeyboardMarkup()
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="settings_menu")
+        settings_menu.add(btn_back)
+        bot.edit_message_text(
+            "⚙️ **Настройки**\n\nУведомления изменены!",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=settings_menu
+        )
+    
+    # ----- АДМИНКА -----
     elif call.data == "admin_panel":
         if user_id != ADMIN_ID:
             bot.answer_callback_query(call.id, "❌ Нет доступа!")
@@ -1355,8 +1578,9 @@ def main_callback_handler(call):
         btn5 = types.InlineKeyboardButton("📦 Заказы", callback_data="admin_orders")
         btn6 = types.InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")
         btn7 = types.InlineKeyboardButton("🎫 Промокоды", callback_data="admin_promocodes")
-        btn8 = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
-        markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7, btn8)
+        btn8 = types.InlineKeyboardButton("⚫ Чёрный список", callback_data="admin_blacklist")
+        btn9 = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+        markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7, btn8, btn9)
         
         bot.answer_callback_query(call.id)
         bot.edit_message_text(
@@ -1384,6 +1608,68 @@ def main_callback_handler(call):
             parse_mode="Markdown"
         )
         bot.register_next_step_handler(msg, process_admin_add_coins)
+    
+    elif call.data == "admin_blacklist":
+        if user_id != ADMIN_ID:
+            return
+        
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('SELECT user_id, username, is_blocked FROM users WHERE is_blocked = 1')
+        blocked = cur.fetchall()
+        cur.execute('SELECT user_id, username, is_blocked FROM users WHERE is_blocked = 0')
+        active = cur.fetchall()
+        conn.close()
+        
+        text = "⚫ **Чёрный список**\n\n"
+        text += "🔴 **Заблокированные:**\n"
+        if blocked:
+            for user_id, username, _ in blocked:
+                text += f"• {user_id} (@{username or 'нет'})\n"
+        else:
+            text += "• Нет заблокированных\n"
+        
+        text += "\n🟢 **Активные:**\n"
+        if active:
+            for user_id, username, _ in active[:10]:
+                text += f"• {user_id} (@{username or 'нет'})\n"
+        else:
+            text += "• Нет активных\n"
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        btn_block = types.InlineKeyboardButton("🔴 Заблокировать", callback_data="admin_block")
+        btn_unblock = types.InlineKeyboardButton("🟢 Разблокировать", callback_data="admin_unblock")
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")
+        markup.add(btn_block, btn_unblock, btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data == "admin_block":
+        if user_id != ADMIN_ID:
+            return
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(
+            call.message.chat.id,
+            "🔴 Введи ID пользователя для блокировки:\nФормат: `123456789`"
+        )
+        bot.register_next_step_handler(msg, process_admin_block)
+    
+    elif call.data == "admin_unblock":
+        if user_id != ADMIN_ID:
+            return
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(
+            call.message.chat.id,
+            "🟢 Введи ID пользователя для разблокировки:\nФормат: `123456789`"
+        )
+        bot.register_next_step_handler(msg, process_admin_unblock)
     
     elif call.data == "admin_reviews":
         if user_id != ADMIN_ID:
@@ -1428,19 +1714,7 @@ def main_callback_handler(call):
         if page < 0:
             page = 0
         
-        conn = sqlite3.connect('bot.db')
-        cur = conn.cursor()
-        offset = page * 10
-        cur.execute('''
-            SELECT user_id, username, balance, coins, total_spent, reg_date, is_blocked 
-            FROM users 
-            ORDER BY reg_date DESC 
-            LIMIT 10 OFFSET ?
-        ''', (offset,))
-        users = cur.fetchall()
-        cur.execute('SELECT COUNT(*) FROM users')
-        total = cur.fetchone()[0]
-        conn.close()
+        users, total = get_all_users(page)
         bot.admin_users_page = page
         
         if not users:
@@ -1481,19 +1755,7 @@ def main_callback_handler(call):
         if page < 0:
             page = 0
         
-        conn = sqlite3.connect('bot.db')
-        cur = conn.cursor()
-        offset = page * 10
-        cur.execute('''
-            SELECT id, user_id, service_name, quantity, price, status, date, order_id
-            FROM orders 
-            ORDER BY id DESC 
-            LIMIT 10 OFFSET ?
-        ''', (offset,))
-        orders = cur.fetchall()
-        cur.execute('SELECT COUNT(*) FROM orders')
-        total = cur.fetchone()[0]
-        conn.close()
+        orders, total = get_all_orders(page)
         bot.admin_orders_page = page
         
         if not orders:
@@ -1562,17 +1824,91 @@ def main_callback_handler(call):
             reply_markup=markup
         )
     
-    # НАЗАД
+    elif call.data == "admin_promocodes":
+        if user_id != ADMIN_ID:
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        btn1 = types.InlineKeyboardButton("📝 Создать промокод", callback_data="admin_promo_create")
+        btn2 = types.InlineKeyboardButton("📋 Список промокодов", callback_data="admin_promo_list")
+        btn3 = types.InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")
+        markup.add(btn1, btn2, btn3)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "🎫 **Управление промокодами**",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data == "admin_promo_create":
+        if user_id != ADMIN_ID:
+            return
+        
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(
+            call.message.chat.id,
+            "📝 **Создание промокода**\n\nВведите название промокода:\n(только латиница и цифры)\n\nИли введите `auto` для генерации случайного кода."
+        )
+        bot.register_next_step_handler(msg, process_admin_promo_create)
+    
+    elif call.data == "admin_promo_list":
+        if user_id != ADMIN_ID:
+            return
+        
+        promos = get_all_promocodes()
+        if not promos:
+            markup = types.InlineKeyboardMarkup()
+            btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="admin_promocodes")
+            markup.add(btn_back)
+            
+            bot.answer_callback_query(call.id)
+            bot.edit_message_text(
+                "📋 **Список промокодов**\n\nНет созданных промокодов.",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=markup
+            )
+            return
+        
+        text = "📋 **Список промокодов:**\n\n"
+        for promo in promos:
+            promo_id, code, bonus_type, bonus_amount, max_uses, used_count, expires_at, is_active = promo
+            status = "🟢 Активен" if is_active else "🔴 Неактивен"
+            type_names = {'rubles': '💰 руб.', 'coins': '🪙 монет', 'discount': '📉 % скидки'}
+            expiry_text = "бессрочно" if not expires_at else expires_at
+            
+            text += f"📝 `{code}`\n"
+            text += f"   {type_names.get(bonus_type, '')} {bonus_amount}\n"
+            text += f"   Использован: {used_count}/{max_uses if max_uses > 0 else '∞'}\n"
+            text += f"   ⏳ {expiry_text}\n"
+            text += f"   {status}\n\n"
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="admin_promocodes"))
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    # ----- НАЗАД -----
     elif call.data == "back_to_start":
         back_to_start(call)
     
     else:
-        bot.answer_callback_query(call.id, "⚠️ Эта функция временно недоступна")
+        bot.answer_callback_query(call.id, "⚠️ Функция временно недоступна")
 
 # ==================================================
-# 10. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (ОБРАБОТЧИКИ СООБЩЕНИЙ)
+# 8. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (ОБРАБОТЧИКИ СООБЩЕНИЙ)
 # ==================================================
-
 def process_quantity(message):
     user_id = message.from_user.id
     try:
@@ -1850,9 +2186,7 @@ def process_coin_link(message):
     
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
-    
     cur.execute('UPDATE users SET coins = coins - ? WHERE user_id = ?', (coins_price, user_id))
-    
     cur.execute('''
         INSERT INTO orders (user_id, service_id, service_name, link, quantity, price, status, order_id, date, last_check)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1863,7 +2197,6 @@ def process_coin_link(message):
     conn.close()
     
     del bot.temp_data[user_id]
-    
     bot.send_message(
         message.chat.id,
         f"✅ **Заказ по монетам создан!**\n\n"
@@ -1881,11 +2214,6 @@ def process_promo_code(message):
     
     if not re.match(r'^[A-Z0-9]+$', code):
         bot.send_message(message.chat.id, "❌ Промокод должен содержать только латинские буквы и цифры!")
-        return
-    
-    promo = get_promo_code(code)
-    if not promo:
-        bot.send_message(message.chat.id, "❌ Промокод не найден или неактивен!")
         return
     
     result = use_promo_code(code, user_id)
@@ -1930,6 +2258,191 @@ def process_admin_add_coins(message):
     except:
         bot.send_message(message.chat.id, "❌ Формат: `100 123456789`")
 
+def process_admin_block(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        user_id = int(message.text.strip())
+        block_user(user_id)
+        bot.send_message(message.chat.id, f"✅ Пользователь {user_id} заблокирован!")
+    except:
+        bot.send_message(message.chat.id, "❌ Введи корректный ID!")
+
+def process_admin_unblock(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        user_id = int(message.text.strip())
+        unblock_user(user_id)
+        bot.send_message(message.chat.id, f"✅ Пользователь {user_id} разблокирован!")
+    except:
+        bot.send_message(message.chat.id, "❌ Введи корректный ID!")
+
+def process_admin_promo_create(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    code = message.text.strip().upper()
+    if code == "AUTO":
+        code = generate_promo_code()
+        bot.send_message(message.chat.id, f"✅ Сгенерирован код: `{code}`", parse_mode="Markdown")
+    
+    if not re.match(r'^[A-Z0-9]+$', code):
+        bot.send_message(message.chat.id, "❌ Только латиница и цифры!")
+        return
+    
+    if not hasattr(bot, 'temp_promo'):
+        bot.temp_promo = {}
+    bot.temp_promo[message.from_user.id] = {'code': code}
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn1 = types.InlineKeyboardButton("💰 Рубли", callback_data="promo_type_rubles")
+    btn2 = types.InlineKeyboardButton("🪙 Монеты", callback_data="promo_type_coins")
+    btn3 = types.InlineKeyboardButton("📉 Скидка %", callback_data="promo_type_discount")
+    markup.add(btn1, btn2, btn3)
+    
+    bot.send_message(
+        message.chat.id,
+        f"📝 Выберите тип бонуса для промокода `{code}`:",
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("promo_type_"))
+def admin_promo_type(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    
+    bonus_type = call.data.replace("promo_type_", "")
+    user_id = call.from_user.id
+    
+    if not hasattr(bot, 'temp_promo') or user_id not in bot.temp_promo:
+        bot.answer_callback_query(call.id, "❌ Ошибка! Начните заново.")
+        return
+    
+    bot.temp_promo[user_id]['bonus_type'] = bonus_type
+    
+    type_names = {'rubles': 'рублей', 'coins': 'монет', 'discount': '% скидки'}
+    bot.answer_callback_query(call.id)
+    
+    msg = bot.send_message(
+        call.message.chat.id,
+        f"📝 Введите количество {type_names.get(bonus_type, '')}:"
+    )
+    bot.register_next_step_handler(msg, admin_promo_amount)
+
+def admin_promo_amount(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        amount = float(message.text.strip())
+        if amount <= 0:
+            bot.send_message(message.chat.id, "❌ Количество должно быть больше 0!")
+            return
+    except:
+        bot.send_message(message.chat.id, "❌ Введите число!")
+        return
+    
+    user_id = message.from_user.id
+    if not hasattr(bot, 'temp_promo') or user_id not in bot.temp_promo:
+        bot.send_message(message.chat.id, "❌ Ошибка! Начните заново.")
+        return
+    
+    bot.temp_promo[user_id]['amount'] = amount
+    bot.send_message(
+        message.chat.id,
+        "📝 Введите максимальное количество активаций:\n(0 = безлимит)"
+    )
+    bot.register_next_step_handler(message, admin_promo_max_uses)
+
+def admin_promo_max_uses(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        max_uses = int(message.text.strip())
+        if max_uses < 0:
+            bot.send_message(message.chat.id, "❌ Не может быть отрицательным!")
+            return
+    except:
+        bot.send_message(message.chat.id, "❌ Введите число!")
+        return
+    
+    user_id = message.from_user.id
+    if not hasattr(bot, 'temp_promo') or user_id not in bot.temp_promo:
+        bot.send_message(message.chat.id, "❌ Ошибка! Начните заново.")
+        return
+    
+    bot.temp_promo[user_id]['max_uses'] = max_uses
+    bot.send_message(
+        message.chat.id,
+        "📝 Введите дату истечения (в формате `ДД.ММ.ГГГГ ЧЧ:ММ`)\nили введите `0` для бессрочного действия:"
+    )
+    bot.register_next_step_handler(message, admin_promo_expiry)
+
+def admin_promo_expiry(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    expiry_input = message.text.strip()
+    
+    if expiry_input == "0":
+        expires_at = None
+    else:
+        try:
+            dt = datetime.datetime.strptime(expiry_input, "%d.%m.%Y %H:%M")
+            expires_at = dt.strftime("%Y-%m-%d %H:%M")
+        except:
+            bot.send_message(message.chat.id, "❌ Неправильный формат! Используйте `ДД.ММ.ГГГГ ЧЧ:ММ`")
+            return
+    
+    user_id = message.from_user.id
+    if not hasattr(bot, 'temp_promo') or user_id not in bot.temp_promo:
+        bot.send_message(message.chat.id, "❌ Ошибка! Начните заново.")
+        return
+    
+    data = bot.temp_promo[user_id]
+    code = data['code']
+    bonus_type = data['bonus_type']
+    amount = data['amount']
+    max_uses = data['max_uses']
+    
+    if create_promo_code(code, bonus_type, amount, max_uses, expires_at):
+        type_names = {'rubles': 'рублей', 'coins': 'монет', 'discount': '% скидки'}
+        expiry_text = "бессрочный" if not expires_at else expires_at
+        bot.send_message(
+            message.chat.id,
+            f"✅ **Промокод создан!**\n\n"
+            f"📝 Код: `{code}`\n"
+            f"🎁 Бонус: {amount} {type_names.get(bonus_type, '')}\n"
+            f"📊 Макс. активаций: {max_uses if max_uses > 0 else '∞'}\n"
+            f"⏳ Срок: {expiry_text}",
+            parse_mode="Markdown"
+        )
+    else:
+        bot.send_message(message.chat.id, "❌ Ошибка! Возможно, такой промокод уже существует.")
+    
+    del bot.temp_promo[user_id]
+
+def buy_menu(call):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_tg = types.InlineKeyboardButton("✈️ Telegram", callback_data="platform_telegram")
+    btn_tt = types.InlineKeyboardButton("📱 TikTok", callback_data="platform_tiktok")
+    btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+    markup.add(btn_tg, btn_tt, btn_back)
+    
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        "🛒 **Выбери платформу:**",
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+
 def process_review(message):
     try:
         text = message.text.strip()
@@ -1958,133 +2471,25 @@ def process_review(message):
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ Ошибка: {e}")
 
-def get_service_category_path(service_id):
-    for platform_name, platform in SERVICES.items():
-        for category_name, category in platform["categories"].items():
-            for subcategory_name, services in category.items():
-                for service in services:
-                    if service["id"] == service_id:
-                        return {
-                            'platform': platform['name'],
-                            'category': category_name,
-                            'subcategory': subcategory_name
-                        }
-    return None
+def back_to_start(call):
+    user_id = call.from_user.id
+    
+    markup = get_main_menu_keyboard(user_id)
+    text = "🏠 **Главное меню**"
+    
+    try:
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
 
-def buy_menu(call):
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_tg = types.InlineKeyboardButton("✈️ Telegram", callback_data="platform_telegram")
-    btn_tt = types.InlineKeyboardButton("📱 TikTok", callback_data="platform_tiktok")
-    btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
-    markup.add(btn_tg, btn_tt, btn_back)
-    
-    bot.answer_callback_query(call.id)
-    bot.edit_message_text(
-        "🛒 **Выбери платформу:**",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=markup
-    )
-
-def get_pending_reviews():
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('SELECT id, user_id, username, rating, review_text, date FROM reviews WHERE is_approved = 0')
-    reviews = cur.fetchall()
-    conn.close()
-    return reviews
-
-def approve_review(review_id):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('SELECT user_id, username, rating, review_text FROM reviews WHERE id = ?', (review_id,))
-    review = cur.fetchone()
-    if review:
-        user_id, username, rating, review_text = review
-        send_review_to_channel(username, user_id, rating, review_text)
-        cur.execute('UPDATE reviews SET is_approved = 1 WHERE id = ?', (review_id,))
-        conn.commit()
-        conn.close()
-        return True
-    conn.close()
-    return False
-
-def decline_review(review_id):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('DELETE FROM reviews WHERE id = ?', (review_id,))
-    conn.commit()
-    conn.close()
-
-def get_promo_code(code):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('''
-        SELECT id, code, bonus_type, bonus_amount, max_uses, used_count, expires_at, is_active
-        FROM promocodes 
-        WHERE code = ? AND is_active = 1
-    ''', (code,))
-    result = cur.fetchone()
-    conn.close()
-    return result
-
-def use_promo_code(code, user_id):
-    promo = get_promo_code(code)
-    if not promo:
-        return {'success': False, 'message': '❌ Промокод не найден или неактивен!'}
-    
-    promo_id, promo_code, bonus_type, bonus_amount, max_uses, used_count, expires_at, is_active = promo
-    
-    if expires_at:
-        try:
-            expiry = datetime.datetime.strptime(expires_at, "%Y-%m-%d %H:%M")
-            if expiry < datetime.datetime.now():
-                return {'success': False, 'message': '❌ Срок действия промокода истёк!'}
-        except:
-            pass
-    
-    if max_uses > 0 and used_count >= max_uses:
-        return {'success': False, 'message': '❌ Промокод уже использован максимальное количество раз!'}
-    
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('SELECT id FROM promocode_uses WHERE promo_id = ? AND user_id = ?', (promo_id, user_id))
-    if cur.fetchone():
-        conn.close()
-        return {'success': False, 'message': '❌ Вы уже использовали этот промокод!'}
-    
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    
-    if bonus_type == 'rubles':
-        cur.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (bonus_amount, user_id))
-        bonus_text = f"{bonus_amount:.2f} руб."
-    elif bonus_type == 'coins':
-        cur.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (bonus_amount, user_id))
-        bonus_text = f"{bonus_amount} монет"
-    elif bonus_type == 'discount':
-        cur.execute('UPDATE users SET pending_discount = ? WHERE user_id = ?', (bonus_amount, user_id))
-        bonus_text = f"{bonus_amount}% скидка на следующий заказ"
-    else:
-        conn.close()
-        return {'success': False, 'message': '❌ Неизвестный тип бонуса!'}
-    
-    cur.execute('UPDATE promocodes SET used_count = used_count + 1 WHERE id = ?', (promo_id,))
-    
-    cur.execute('''
-        INSERT INTO promocode_uses (promo_id, user_id, used_at)
-        VALUES (?, ?, ?)
-    ''', (promo_id, user_id, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
-    
-    conn.commit()
-    conn.close()
-    
-    return {'success': True, 'message': f'✅ Промокод активирован!\n\n🎁 Бонус: {bonus_text}', 'bonus_type': bonus_type, 'bonus_amount': bonus_amount}
-
-# ==================================================
-# 11. КОМАНДА /START
-# ==================================================
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
@@ -2203,30 +2608,7 @@ def show_channels_and_menu(chat_id, user_id):
     )
 
 # ==================================================
-# 12. НАЗАД В ГЛАВНОЕ МЕНЮ
-# ==================================================
-@bot.callback_query_handler(func=lambda call: call.data == "back_to_start")
-def back_to_start(call):
-    user_id = call.from_user.id
-    
-    markup = get_main_menu_keyboard(user_id)
-    text = "🏠 **Главное меню**"
-    
-    try:
-        bot.edit_message_text(
-            text,
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown",
-            reply_markup=markup
-        )
-        bot.answer_callback_query(call.id)
-    except Exception as e:
-        bot.answer_callback_query(call.id)
-        bot.send_message(call.message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
-
-# ==================================================
-# 13. ЗАПУСК
+# 9. ЗАПУСК
 # ==================================================
 if __name__ == "__main__":
     import threading
@@ -2236,14 +2618,12 @@ if __name__ == "__main__":
     print(f"📱 Бот: @{BOT_USERNAME}")
     print(f"📢 Канал: {CHANNEL_ID}")
 
-    # Удаляем старый webhook (если был)
     try:
         bot.delete_webhook()
         print("✅ Webhook удалён!")
     except:
         pass
 
-    # Устанавливаем webhook на текущий URL
     webhook_url = "https://nekrokrutka-bot.onrender.com/webhook"
     bot.set_webhook(url=webhook_url)
     print(f"✅ Webhook установлен: {webhook_url}")
