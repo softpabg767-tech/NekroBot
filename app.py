@@ -13,54 +13,87 @@ import random
 import string
 from flask import Flask, request, jsonify
 
+# ==================================================
+# 1. ОТКЛЮЧАЕМ SSL ПРЕДУПРЕЖДЕНИЯ
+# ==================================================
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ===== КОНФИГ =====
+# ==================================================
+# 2. КОНФИГУРАЦИЯ (ВСЁ В ПЕРЕМЕННЫХ ОКРУЖЕНИЯ)
+# ==================================================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
-    raise ValueError("❌ TELEGRAM_TOKEN не найден в переменных окружения!")
+    raise ValueError("❌ TELEGRAM_TOKEN не найден!")
 
 API_KEY = "Tv2GrTBsyJXEBRwgUHmcUY9Gd5KnOgIA9zX5Vn3f3dAkqFgwLefrMdKVATwN"
 API_URL = "https://kuzya-boost.ru/api/v2"
 ADMIN_ID = 593150935
 BOT_USERNAME = "NekroKrutka_rabot"
 CHANNEL_ID = "@repaBotaNakruta"
-CRYPTOBOT_TOKEN = os.getenv("CRYPTOBOT_TOKEN")
 
-if not CRYPTOBOT_TOKEN:
-    print("⚠️ CRYPTOBOT_TOKEN не найден! Автопополнение через криптобот не будет работать.")
+# Ключ для криптобота (будет тянуться из окружения)
+CRYPTOBOT_TOKEN = os.getenv("CRYPTOBOT_TOKEN")
 
 bot = telebot.TeleBot(TOKEN)
 session = requests.Session()
 session.verify = False
 session.headers.update({'User-Agent': 'Mozilla/5.0'})
-
 print("✅ Бот инициализирован")
 
-# ===== Flask приложение =====
+# ==================================================
+# 3. FLASK-ПРИЛОЖЕНИЕ (ОТВЕЧАЕТ ЗА ВЕБХУКИ)
+# ==================================================
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def index():
     return "🤖 Бот NekroKrutka работает!"
 
+# ВЕБХУК ДЛЯ ТЕЛЕГРАМ
 @flask_app.route('/webhook', methods=['POST'])
+def webhook():
+    try:
+        json_data = request.get_json()
+        if not json_data:
+            return jsonify({'status': 'error', 'message': 'No data'}), 400
+        
+        update = telebot.types.Update.de_json(json_data)
+        if update:
+            bot.process_new_updates([update])
+        return jsonify({'status': 'ok'}), 200
+    except Exception as e:
+        print(f"❌ Ошибка webhook Telegram: {e}")
+        return jsonify({'status': 'error'}), 500
+
+# ВЕБХУК ДЛЯ CRYPTOBOT (АВТОМАТИЧЕСКОЕ ПОПОЛНЕНИЕ)
+@flask_app.route('/crypto_webhook', methods=['POST'])
 def crypto_webhook():
     try:
         data = request.get_json()
-        print(f"📩 Webhook получен: {data}")
+        if not data:
+            return jsonify({'status': 'error', 'message': 'No data'}), 400
+        
+        print(f"📩 CryptoBot Webhook: {data}")
         
         if data.get('status') == 'paid':
-            invoice_id = data.get('invoice_id')
-            user_id = int(data.get('user_id'))
-            amount_rub = float(data.get('amount_rub'))
+            payload = data.get('payload', {})
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except:
+                    payload = {}
             
+            user_id = int(payload.get('user_id'))
+            amount_rub = float(payload.get('amount_rub'))
+            
+            # Начисляем деньги
             conn = sqlite3.connect('bot.db')
             cur = conn.cursor()
             cur.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount_rub, user_id))
             conn.commit()
             conn.close()
             
+            # Уведомляем пользователя
             try:
                 new_balance = get_user_balance(user_id)
                 bot.send_message(
@@ -69,28 +102,21 @@ def crypto_webhook():
                     f"💰 Сумма: {amount_rub:.2f} руб.\n"
                     f"📊 Новый баланс: {new_balance:.2f} руб."
                 )
-            except:
-                pass
+            except Exception as e:
+                print(f"⚠️ Не удалось уведомить пользователя: {e}")
             
             return jsonify({'status': 'ok'}), 200
         
         return jsonify({'status': 'ignored'}), 200
     except Exception as e:
-        print(f"❌ Ошибка webhook: {e}")
+        print(f"❌ Ошибка CryptoBot webhook: {e}")
         return jsonify({'status': 'error'}), 500
 
-# ===== НАЦЕНКИ =====
-def get_markup(price):
-    if price < 5:
-        return 10
-    elif price < 20:
-        return 20
-    elif price < 50:
-        return 30
-    else:
-        return 50
+# ==================================================
+# 4. БАЗА ДАННЫХ И ОСНОВНЫЕ ФУНКЦИИ
+# ==================================================
 
-# ===== СИСТЕМА УРОВНЕЙ =====
+# СИСТЕМА УРОВНЕЙ
 LEVELS = {
     "novice": {"name": "🟢 Новичок", "discount": 0, "spent_required": 0},
     "advanced": {"name": "🟡 Продвинутый", "discount": 3.5, "spent_required": 50},
@@ -98,72 +124,6 @@ LEVELS = {
     "reseller": {"name": "⚫ Реселлер", "discount": 10, "spent_required": 0}
 }
 
-def get_user_level(user_id):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('SELECT total_spent, is_reseller FROM users WHERE user_id = ?', (user_id,))
-    result = cur.fetchone()
-    conn.close()
-    
-    if not result:
-        return "novice"
-    
-    total_spent, is_reseller = result
-    
-    if is_reseller == 1:
-        return "reseller"
-    
-    if total_spent >= 150:
-        return "vip"
-    elif total_spent >= 50:
-        return "advanced"
-    else:
-        return "novice"
-
-def get_user_discount(user_id):
-    level = get_user_level(user_id)
-    return LEVELS[level]["discount"]
-
-# ===== ТОВАРЫ ДЛЯ ОБМЕНА МОНЕТ =====
-COINS_SHOP = {
-    "telegram_subscribers": {
-        "name": "🎁 Telegram Подписчики",
-        "id": 1537,
-        "quantity": 100,
-        "coins": 200,
-        "description": "100 подписчиков"
-    },
-    "telegram_positive": {
-        "name": "🎁 Telegram Позитивные Реакции",
-        "id": 1558,
-        "quantity": 50,
-        "coins": 200,
-        "description": "50 позитивных реакций"
-    },
-    "telegram_negative": {
-        "name": "🎁 Telegram Негативные Реакции",
-        "id": 1559,
-        "quantity": 50,
-        "coins": 200,
-        "description": "50 негативных реакций"
-    },
-    "tiktok_views": {
-        "name": "🎁 TikTok Просмотры",
-        "id": 119,
-        "quantity": 500,
-        "coins": 200,
-        "description": "500 просмотров"
-    },
-    "tiktok_likes": {
-        "name": "🎁 TikTok Лайки",
-        "id": 120,
-        "quantity": 100,
-        "coins": 100,
-        "description": "100 лайков"
-    }
-}
-
-# ===== БАЗА ДАННЫХ =====
 def init_db():
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
@@ -271,7 +231,10 @@ def init_db():
 
 init_db()
 
-# ===== ФУНКЦИИ =====
+# ==================================================
+# 5. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (БАЛАНСЫ, ЦЕНЫ, API)
+# ==================================================
+
 def get_user_balance(user_id):
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
@@ -288,41 +251,31 @@ def get_user_coins(user_id):
     conn.close()
     return result[0] if result else 0
 
-def is_user_blocked(user_id):
+def get_user_level(user_id):
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
-    cur.execute('SELECT is_blocked FROM users WHERE user_id = ?', (user_id,))
+    cur.execute('SELECT total_spent, is_reseller FROM users WHERE user_id = ?', (user_id,))
     result = cur.fetchone()
     conn.close()
-    return result[0] == 1 if result else False
+    
+    if not result:
+        return "novice"
+    
+    total_spent, is_reseller = result
+    
+    if is_reseller == 1:
+        return "reseller"
+    
+    if total_spent >= 150:
+        return "vip"
+    elif total_spent >= 50:
+        return "advanced"
+    else:
+        return "novice"
 
-def block_user(user_id):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('UPDATE users SET is_blocked = 1 WHERE user_id = ?', (user_id,))
-    conn.commit()
-    conn.close()
-
-def unblock_user(user_id):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('UPDATE users SET is_blocked = 0 WHERE user_id = ?', (user_id,))
-    conn.commit()
-    conn.close()
-
-def reset_user_coins(user_id):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('UPDATE users SET coins = 0 WHERE user_id = ?', (user_id,))
-    conn.commit()
-    conn.close()
-
-def set_reseller_status(user_id, value):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('UPDATE users SET is_reseller = ? WHERE user_id = ?', (value, user_id))
-    conn.commit()
-    conn.close()
+def get_user_discount(user_id):
+    level = get_user_level(user_id)
+    return LEVELS[level]["discount"]
 
 def get_service_price(service_id):
     try:
@@ -342,6 +295,16 @@ def get_service_price_with_markup(service_id):
     if price is None:
         return None
     return price + get_markup(price)
+
+def get_markup(price):
+    if price < 5:
+        return 10
+    elif price < 20:
+        return 20
+    elif price < 50:
+        return 30
+    else:
+        return 50
 
 def create_order_api(service_id, link, quantity):
     try:
@@ -376,14 +339,6 @@ def refill_order_api(order_id):
     except Exception as e:
         return {"error": str(e)}
 
-def has_user_reviewed(user_id):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('SELECT COUNT(*) FROM reviews WHERE user_id = ? AND is_approved = 1', (user_id,))
-    count = cur.fetchone()[0]
-    conn.close()
-    return count > 0
-
 def get_service_name_by_id(service_id):
     for platform in SERVICES.values():
         for category in platform["categories"].values():
@@ -392,19 +347,6 @@ def get_service_name_by_id(service_id):
                     if service["id"] == service_id:
                         return service["name"]
     return f"Услуга #{service_id}"
-
-def get_service_category_path(service_id):
-    for platform_name, platform in SERVICES.items():
-        for category_name, category in platform["categories"].items():
-            for subcategory_name, services in category.items():
-                for service in services:
-                    if service["id"] == service_id:
-                        return {
-                            'platform': platform['name'],
-                            'category': category_name,
-                            'subcategory': subcategory_name
-                        }
-    return None
 
 def parse_guarantee(service_name):
     name_lower = service_name.lower()
@@ -479,39 +421,21 @@ def get_refillable_orders(user_id):
             continue
     return refillable
 
-def get_referral_stats(user_id):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('SELECT COUNT(*) FROM referrals WHERE referrer_id = ?', (user_id,))
-    count = cur.fetchone()[0]
-    cur.execute('''
-        SELECT referee_id, date 
-        FROM referrals 
-        WHERE referrer_id = ? 
-        ORDER BY date DESC
-    ''', (user_id,))
-    referrals = cur.fetchall()
-    conn.close()
-    return count, referrals
-
 def get_ref_link(user_id):
     return f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
 
-def get_next_review_number():
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('UPDATE review_counter SET counter = counter + 1 WHERE id = 1')
-    cur.execute('SELECT counter FROM review_counter WHERE id = 1')
-    result = cur.fetchone()
-    conn.commit()
-    conn.close()
-    return result[0] if result else 1
-
 def send_review_to_channel(username, user_id, rating, review_text):
     try:
-        review_number = get_next_review_number()
-        date = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('UPDATE review_counter SET counter = counter + 1 WHERE id = 1')
+        cur.execute('SELECT counter FROM review_counter WHERE id = 1')
+        result = cur.fetchone()
+        review_number = result[0] if result else 1
+        conn.commit()
+        conn.close()
         
+        date = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
         text = (
             f"⭐️ **Отзыв #{review_number}**\n\n"
             f"👤 @{username} (ID: {user_id})\n"
@@ -526,24 +450,1572 @@ def send_review_to_channel(username, user_id, rating, review_text):
         print(f"Ошибка отправки в канал: {e}")
         return False
 
-# ===== ПРОМОКОДЫ =====
-def generate_promo_code():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=6))
-
-def create_promo_code(code, bonus_type, bonus_amount, max_uses, expires_at=None):
+def is_user_blocked(user_id):
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
-    try:
+    cur.execute('SELECT is_blocked FROM users WHERE user_id = ?', (user_id,))
+    result = cur.fetchone()
+    conn.close()
+    return result[0] == 1 if result else False
+
+def block_user(user_id):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('UPDATE users SET is_blocked = 1 WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def unblock_user(user_id):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('UPDATE users SET is_blocked = 0 WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def set_reseller_status(user_id, value):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('UPDATE users SET is_reseller = ? WHERE user_id = ?', (value, user_id))
+    conn.commit()
+    conn.close()
+
+# ==================================================
+# 6. МОНИТОРИНГ СТАТУСОВ ЗАКАЗОВ (ФОНОВЫЙ ПОТОК)
+# ==================================================
+def check_orders_status():
+    while True:
+        try:
+            conn = sqlite3.connect('bot.db')
+            cur = conn.cursor()
+            cur.execute('''
+                SELECT id, user_id, order_id, service_name, quantity, price, status
+                FROM orders 
+                WHERE status IN ('pending', 'выполняется', 'Awaiting', 'In progress')
+            ''')
+            orders = cur.fetchall()
+            for order in orders:
+                db_id, user_id, order_id, service_name, quantity, price, status = order
+                result = get_order_status_api(order_id)
+                if 'error' not in result:
+                    new_status = result.get('status', 'Unknown')
+                    status_display = {
+                        'In progress': 'выполняется',
+                        'Completed': 'выполнен ✅',
+                        'Awaiting': 'ожидает',
+                        'Canceled': 'отменён ❌',
+                        'Fail': 'ошибка ❌',
+                        'Partial': 'частично выполнен ⚠️'
+                    }.get(new_status, new_status)
+                    if status_display != status:
+                        cur.execute('UPDATE orders SET status = ?, last_check = ? WHERE id = ?',
+                                   (status_display, datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), db_id))
+                        conn.commit()
+                        if new_status in ['Completed', 'Canceled', 'Fail']:
+                            try:
+                                bot.send_message(
+                                    user_id,
+                                    f"📢 Статус заказа обновлён!\n\n"
+                                    f"📦 {service_name}\n"
+                                    f"📊 {quantity} шт | 💰 {price:.2f} руб\n"
+                                    f"📌 Новый статус: {status_display}"
+                                )
+                            except:
+                                pass
+            conn.close()
+        except Exception as e:
+            print(f"Ошибка мониторинга: {e}")
+        time.sleep(60)
+
+# ==================================================
+# 7. СТРУКТУРА УСЛУГ
+# ==================================================
+SERVICES = {
+    "telegram": {
+        "name": "✈️ Telegram",
+        "categories": {
+            "Подписчики": {
+                "С гарантией": [
+                    {"id": 1631, "name": "⭐️ Telegram Подписчики [1+ день без списаний ♻️] [Моментальные]"},
+                    {"id": 1583, "name": "⭐️ Telegram Подписчики [3 дня без списаний ♻️] [Моментальные]"},
+                    {"id": 1585, "name": "⭐️ Telegram Подписчики [7 дней без списаний ♻️] [Моментальные]"},
+                    {"id": 1580, "name": "⭐️ Telegram Подписчики [Навсегда без списаний ♻️] [Моментальные]"},
+                ],
+                "Без гарантии": [
+                    {"id": 1900, "name": "Telegram Подписчики [Без гарантии] [Моментальный старт]"},
+                    {"id": 1630, "name": "Telegram Подписчики [Без гарантии ⛔️] [Рефилл 30 дней ♻️]"},
+                ]
+            },
+            "Реакции": {
+                "С просмотрами": [
+                    {"id": 1670, "name": "Telegram Позитивные Реакции [👍🤩🎉🔥❤️🥰👏🏻🥳😍❤️‍🔥💯] + Просмотры"},
+                    {"id": 1671, "name": "Telegram Негативные Реакции [🖕💔👎😢💩🤮🤬😡🥱🍌😈] + Просмотры"},
+                ],
+                "Без просмотров": [
+                    {"id": 1574, "name": "Telegram Позитивные Реакции [👍🎉🔥❤️🥰🤩👏🏻]"},
+                    {"id": 1535, "name": "Telegram Реакция [👍❤️🔥🎉]"},
+                    {"id": 1536, "name": "Telegram Реакция [👎💩😱😢]"},
+                    {"id": 1499, "name": "Telegram Негативные Реакции [👎💩🤮🤔🤯😁😢🤬]"},
+                ]
+            },
+            "Просмотры": {
+                "Все": [
+                    {"id": 1547, "name": "⭐ Telegram Просмотры на пост [Быстрый старт]"},
+                    {"id": 1548, "name": "Telegram Просмотры на пост [Моментальные]"},
+                ]
+            }
+        }
+    },
+    "tiktok": {
+        "name": "📱 TikTok",
+        "categories": {
+            "Просмотры": {
+                "С гарантией": [
+                    {"id": 1609, "name": "TikTok Просмотры [Моментальный старт] [Гарантия 30 дней ♻️]"},
+                ],
+                "Без гарантии": [
+                    {"id": 1617, "name": "TikTok Просмотры [Моментальный старт] [Без гарантии ⛔]"},
+                ]
+            },
+            "Лайки": {
+                "С гарантией": [
+                    {"id": 172, "name": "⭐️ TikTok Лайки [Моментальные] [Гарантия 30 дней♻️]"},
+                ],
+                "Без гарантии": [
+                    {"id": 110, "name": "⭐️ TikTok Лайки [Моментальные] [Без гарантии⛔️]"},
+                ]
+            },
+            "Репосты/Сохранения": {
+                "Все": [
+                    {"id": 1640, "name": "TikTok Поделиться [Без списаний]"},
+                    {"id": 1641, "name": "TikTok Сохранения [Без списаний ♻️]"},
+                ]
+            }
+        }
+    }
+}
+
+# ==================================================
+# 8. ГЛАВНОЕ МЕНЮ
+# ==================================================
+def get_main_menu_keyboard(user_id):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    btn_balance = types.InlineKeyboardButton("💰 Баланс", callback_data="balance")
+    btn_buy = types.InlineKeyboardButton("🛒 Купить накрутку", callback_data="buy_menu")
+    btn_refill = types.InlineKeyboardButton("🔄 Рефилл", callback_data="refill")
+    btn_history = types.InlineKeyboardButton("📜 История заказов", callback_data="history")
+    btn_reviews = types.InlineKeyboardButton("⭐️ Отзывы", callback_data="reviews_menu")
+    btn_help = types.InlineKeyboardButton("❓ Помощь", callback_data="help")
+    btn_ref = types.InlineKeyboardButton("👥 Реферальная программа", callback_data="ref_program")
+    btn_promo = types.InlineKeyboardButton("🎫 Промокод", callback_data="promo_menu")
+    btn_settings = types.InlineKeyboardButton("⚙️ Настройки", callback_data="settings_menu")
+    
+    if user_id == ADMIN_ID:
+        btn_admin = types.InlineKeyboardButton("🛡️ Админ-панель", callback_data="admin_panel")
+        markup.add(btn_balance, btn_buy, btn_refill, btn_history, btn_reviews, btn_help, btn_ref, btn_promo, btn_settings, btn_admin)
+    else:
+        markup.add(btn_balance, btn_buy, btn_refill, btn_history, btn_reviews, btn_help, btn_ref, btn_promo, btn_settings)
+    
+    return markup
+
+# ==================================================
+# 9. ОБРАБОТЧИКИ КНОПОК (ВЕСЬ ФУНКЦИОНАЛ)
+# ==================================================
+@bot.callback_query_handler(func=lambda call: True)
+def main_callback_handler(call):
+    user_id = call.from_user.id
+    
+    if is_user_blocked(user_id) and call.data != "back_to_start":
+        bot.answer_callback_query(call.id, "⛔ Ваш аккаунт заблокирован!")
+        return
+    
+    print(f"📩 Нажата кнопка: {call.data} от {user_id}")
+    
+    # БАЛАНС
+    if call.data == "balance":
+        balance = get_user_balance(user_id)
+        coins = get_user_coins(user_id)
+        level = get_user_level(user_id)
+        discount = get_user_discount(user_id)
+        
+        markup = types.InlineKeyboardMarkup()
+        btn_deposit = types.InlineKeyboardButton("💳 Пополнить", callback_data="deposit")
+        markup.add(btn_deposit)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            f"💰 **Твой баланс:** {balance:.2f} руб.\n"
+            f"🪙 **Монеты:** {coins}\n"
+            f"📊 **Уровень:** {LEVELS[level]['name']}\n"
+            f"📉 **Скидка:** {discount}%\n\n"
+            f"💳 Для пополнения нажми кнопку ниже.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    # ПОПОЛНЕНИЕ
+    elif call.data == "deposit":
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        btn_crypto = types.InlineKeyboardButton("💳 CryptoBot", callback_data="deposit_crypto")
+        btn_stars = types.InlineKeyboardButton("⭐️ Звёзды", callback_data="deposit_stars")
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="balance")
+        markup.add(btn_crypto, btn_stars, btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "💳 **Выбери способ пополнения:**",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    # CRYPTOBOT
+    elif call.data == "deposit_crypto":
+        markup = types.InlineKeyboardMarkup()
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="deposit")
+        markup.add(btn_back)
+        
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(
+            call.message.chat.id,
+            "💳 **Пополнение через CryptoBot**\n\n"
+            "💰 Актуальные курсы:\n"
+            "• USDT — 1 USDT = 85 руб\n"
+            "• Gram (GRAM) — 1 GRAM = 140 руб\n\n"
+            "📌 Минимальная сумма: 10 руб\n"
+            "📌 Максимальная сумма: 10000 руб\n\n"
+            "💳 Введите сумму в рублях:",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.register_next_step_handler(msg, process_crypto_deposit)
+    
+    # ЗВЁЗДЫ
+    elif call.data == "deposit_stars":
+        markup = types.InlineKeyboardMarkup(row_width=3)
+        btns = [15, 25, 50, 75, 100, 150, 200, 350, 500]
+        for val in btns:
+            markup.add(types.InlineKeyboardButton(f"{val} ⭐️", callback_data=f"stars_{val}"))
+        markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="deposit"))
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "⭐️ **Пополнение звёздами**\n\n"
+            "💰 1 звезда = 0.80 руб\n"
+            "📌 Выбери сумму:",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data.startswith("stars_"):
+        stars = call.data.split("_")[1]
+        markup = types.InlineKeyboardMarkup()
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="deposit_stars")
+        markup.add(btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            f"⭐️ **Скиньте {stars} звёзд админу @nekrophoros**\n\n"
+            f"✅ После получения звёзд баланс будет пополнен!",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    # КУПИТЬ НАКРУТКУ
+    elif call.data == "buy_menu":
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        btn_tg = types.InlineKeyboardButton("✈️ Telegram", callback_data="platform_telegram")
+        btn_tt = types.InlineKeyboardButton("📱 TikTok", callback_data="platform_tiktok")
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+        markup.add(btn_tg, btn_tt, btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "🛒 **Выбери платформу:**",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data.startswith("platform_"):
+        platform = call.data.split("_")[1]
+        platform_data = SERVICES.get(platform)
+        if not platform_data:
+            bot.answer_callback_query(call.id, "❌ Ошибка")
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for category_name in platform_data["categories"].keys():
+            btn = types.InlineKeyboardButton(
+                f"📌 {category_name}",
+                callback_data=f"category_{platform}_{category_name}"
+            )
+            markup.add(btn)
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="buy_menu")
+        markup.add(btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            f"📂 **{platform_data['name']} — выбери категорию:**",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data.startswith("category_"):
+        _, platform, category = call.data.split("_", 2)
+        platform_data = SERVICES.get(platform)
+        if not platform_data or category not in platform_data["categories"]:
+            bot.answer_callback_query(call.id, "❌ Ошибка")
+            return
+        
+        subcategories = platform_data["categories"][category]
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for sub_name in subcategories.keys():
+            btn = types.InlineKeyboardButton(
+                f"🔹 {sub_name}",
+                callback_data=f"sub_{platform}_{category}_{sub_name}"
+            )
+            markup.add(btn)
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data=f"platform_{platform}")
+        markup.add(btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            f"📂 **{category} — выбери тип:**",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data.startswith("sub_"):
+        _, platform, category, subcategory = call.data.split("_", 3)
+        services_list = SERVICES[platform]["categories"][category][subcategory]
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for service in services_list:
+            btn = types.InlineKeyboardButton(
+                f"🛒 {service['name']}",
+                callback_data=f"service_{service['id']}"
+            )
+            markup.add(btn)
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data=f"category_{platform}_{category}")
+        markup.add(btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "📦 **Выбери услугу:**",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data.startswith("service_"):
+        service_id = int(call.data.split("_")[1])
+        user_id = call.from_user.id
+        
+        service_name = get_service_name_by_id(service_id)
+        price_with_markup = get_service_price_with_markup(service_id)
+        category_path = get_service_category_path(service_id)
+        guarantee_info = parse_guarantee(service_name)
+        
+        if price_with_markup is None:
+            bot.answer_callback_query(call.id, "❌ Ошибка получения цены!")
+            return
+        
+        text = f"📦 **{service_name}**\n\n"
+        text += f"📊 1000 единиц — {price_with_markup:.2f} руб.\n"
+        
+        if guarantee_info['has_guarantee']:
+            text += f"⏳ Гарантия: {guarantee_info['guarantee_text']} (Рефилл доступен)\n"
+        else:
+            if guarantee_info['guarantee_text'] == 'Не указана':
+                text += f"⏳ Гарантия: Не указана\n"
+            else:
+                text += f"⏳ Гарантия: Нет (Рефилл недоступен)\n"
+        
+        if category_path:
+            text += f"📌 Категория: {category_path['platform']} → {category_path['category']} → {category_path['subcategory']}\n"
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        btn_buy = types.InlineKeyboardButton("🛒 Купить", callback_data=f"buy_service_{service_id}")
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_services")
+        markup.add(btn_buy, btn_back)
+        
+        if not hasattr(bot, 'temp_data'):
+            bot.temp_data = {}
+        bot.temp_data[user_id] = {"service_id": service_id}
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data.startswith("buy_service_"):
+        user_id = call.from_user.id
+        service_id = int(call.data.split("_")[2])
+        
+        if not hasattr(bot, 'temp_data') or user_id not in bot.temp_data:
+            bot.temp_data[user_id] = {"service_id": service_id}
+        
+        markup = types.InlineKeyboardMarkup()
+        btn_cancel = types.InlineKeyboardButton("❌ Отмена", callback_data="back_to_services")
+        markup.add(btn_cancel)
+        
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(
+            call.message.chat.id,
+            "📝 **Введите количество (от 1 до 100000):**",
+            reply_markup=markup
+        )
+        bot.register_next_step_handler(msg, process_quantity)
+    
+    elif call.data == "back_to_services":
+        user_id = call.from_user.id
+        if hasattr(bot, 'temp_data') and user_id in bot.temp_data:
+            del bot.temp_data[user_id]
+        
+        bot.answer_callback_query(call.id)
+        buy_menu(call)
+    
+    # ИСТОРИЯ
+    elif call.data == "history":
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
         cur.execute('''
-            INSERT INTO promocodes (code, bonus_type, bonus_amount, max_uses, expires_at, created_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (code, bonus_type, bonus_amount, max_uses, expires_at, ADMIN_ID, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
+            SELECT service_name, quantity, price, status, date, order_id
+            FROM orders 
+            WHERE user_id = ? 
+            ORDER BY id DESC 
+            LIMIT 20
+        ''', (user_id,))
+        orders = cur.fetchall()
+        conn.close()
+        
+        if not orders:
+            text = "📜 У тебя пока нет заказов."
+        else:
+            text = "📜 **Твои заказы:**\n\n"
+            for order in orders:
+                status_emoji = {
+                    'pending': '⏳',
+                    'выполняется': '🔄',
+                    'выполнен ✅': '✅',
+                    'отменён ❌': '❌',
+                    'ошибка ❌': '❌'
+                }.get(order[3], '❓')
+                text += f"{status_emoji} **{order[0]}**\n"
+                text += f"📊 {order[1]} шт | 💰 {order[2]:.2f} руб.\n"
+                text += f"🆔 ID: {order[5]}\n"
+                text += f"📅 {order[4]}\n\n"
+        
+        markup = types.InlineKeyboardMarkup()
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+        markup.add(btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    # РЕФИЛЛ
+    elif call.data == "refill":
+        refillable_orders = get_refillable_orders(user_id)
+        refill_info = "ℹ️ Рефилл доступен только если с момента выполнения заказа прошло 24 часа ⏳ и услуга была с гарантией 🛡️\n\n"
+        
+        if not refillable_orders:
+            markup = types.InlineKeyboardMarkup()
+            btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+            markup.add(btn_back)
+            
+            bot.answer_callback_query(call.id)
+            bot.edit_message_text(
+                f"🔄 **Рефилл**\n\n{refill_info}У вас нет заказов для рефилла.",
+                call.message.chat.id,
+                call.message.message_id,
+                parse_mode="Markdown",
+                reply_markup=markup
+            )
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for order in refillable_orders:
+            btn = types.InlineKeyboardButton(
+                f"🔄 {order['service_name'][:25]}...",
+                callback_data=f"refill_order_{order['id']}"
+            )
+            markup.add(btn)
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+        markup.add(btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            f"🔄 **Выбери заказ для рефилла:**\n\n{refill_info}",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data.startswith("refill_order_"):
+        order_db_id = int(call.data.split("_")[2])
+        
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('SELECT service_name, order_id FROM orders WHERE id = ? AND user_id = ?', (order_db_id, user_id))
+        order = cur.fetchone()
+        conn.close()
+        
+        if not order:
+            bot.answer_callback_query(call.id, "❌ Заказ не найден!")
+            return
+        
+        service_name, api_order_id = order
+        result = refill_order_api(api_order_id)
+        
+        if 'error' in result:
+            bot.answer_callback_query(call.id, f"❌ Ошибка: {result['error']}")
+            return
+        
+        bot.answer_callback_query(call.id, "✅ Рефилл отправлен!")
+        bot.edit_message_text(
+            f"🔄 **Рефилл отправлен!**\n📦 {service_name}",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown"
+        )
+    
+    # ОТЗЫВЫ
+    elif call.data == "reviews_menu":
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        btn_add = types.InlineKeyboardButton("✏️ Оставить отзыв", callback_data="review_add")
+        btn_show = types.InlineKeyboardButton("📝 Посмотреть отзывы", callback_data="review_show")
+        btn_channel = types.InlineKeyboardButton("📢 Отзывы в канале", url="https://t.me/repaBotaNakruta")
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+        markup.add(btn_add, btn_show, btn_channel, btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "⭐️ **Отзывы**",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data == "review_add":
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM reviews WHERE user_id = ? AND is_approved = 1', (user_id,))
+        count = cur.fetchone()[0]
+        conn.close()
+        
+        if count > 0:
+            bot.answer_callback_query(call.id, "❌ Ты уже оставлял отзыв!")
+            return
+        
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(
+            call.message.chat.id,
+            "✏️ **Напиши отзыв в формате:** `5 Текст отзыва`",
+            parse_mode="Markdown"
+        )
+        bot.register_next_step_handler(msg, process_review)
+    
+    elif call.data == "review_show":
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('SELECT username, rating, review_text, date FROM reviews WHERE is_approved = 1 ORDER BY id DESC LIMIT 10')
+        reviews = cur.fetchall()
+        conn.close()
+        
+        if not reviews:
+            text = "📝 Отзывов пока нет."
+        else:
+            text = "⭐️ **Отзывы:**\n\n"
+            for username, rating, review_text, date in reviews:
+                text += f"{'⭐' * rating} **{username}**\n"
+                text += f"📝 {review_text}\n"
+                text += f"📅 {date}\n\n"
+        
+        markup = types.InlineKeyboardMarkup()
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="reviews_menu")
+        markup.add(btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+    
+    # ПОМОЩЬ
+    elif call.data == "help":
+        markup = types.InlineKeyboardMarkup()
+        btn_admin = types.InlineKeyboardButton("📞 Вызвать админа", callback_data="call_admin")
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+        markup.add(btn_admin, btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "❓ **Помощь**\n\nЕсли есть проблема — вызови админа.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data == "call_admin":
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('INSERT OR REPLACE INTO admin_chats (user_id, active, start_time) VALUES (?, ?, ?)',
+                    (user_id, 1, datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
+        conn.commit()
+        conn.close()
+        
+        bot.send_message(ADMIN_ID, f"📞 Вызов админа!\n👤 {call.from_user.first_name}\n🆔 ID: {user_id}")
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "✅ Администратор вызван!",
+            call.message.chat.id,
+            call.message.message_id
+        )
+    
+    # РЕФЕРАЛКА
+    elif call.data == "ref_program":
+        coins = get_user_coins(user_id)
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM referrals WHERE referrer_id = ?', (user_id,))
+        count = cur.fetchone()[0]
+        cur.execute('''
+            SELECT referee_id, date 
+            FROM referrals 
+            WHERE referrer_id = ? 
+            ORDER BY date DESC
+        ''', (user_id,))
+        referrals = cur.fetchall()
+        conn.close()
+        
+        ref_link = get_ref_link(user_id)
+        
+        text = f"👥 **Реферальная программа**\n\n"
+        text += f"💰 **Ваши монеты:** {coins}\n"
+        text += f"👤 **Приглашено:** {count} человек\n\n"
+        
+        if referrals:
+            text += "📋 **Ваши рефералы:**\n"
+            for referee_id, date in referrals[:10]:
+                conn = sqlite3.connect('bot.db')
+                cur = conn.cursor()
+                cur.execute('SELECT username FROM users WHERE user_id = ?', (referee_id,))
+                result = cur.fetchone()
+                conn.close()
+                username = result[0] if result else "Неизвестно"
+                text += f"• {username} — {date}\n"
+        else:
+            text += "📋 У вас пока нет рефералов.\n"
+        
+        text += f"\n🔗 **Ваша ссылка:**\n`{ref_link}`\n\n"
+        text += "📌 **Как это работает:**\n"
+        text += "• Пригласите друга по ссылке\n"
+        text += "• Он получит **10% скидку** на первую покупку (48 часов)\n"
+        text += "• Вы получите **100 монет** за каждого друга!\n\n"
+        text += "🪙 **Обмен монет:**\n"
+        text += "Монеты можно обменять на бесплатные услуги!"
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        btn_share = types.InlineKeyboardButton("📤 Поделиться ссылкой", callback_data="share_ref_link")
+        btn_shop = types.InlineKeyboardButton("🪙 Обмен монет", callback_data="coins_shop")
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+        markup.add(btn_share, btn_shop, btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data == "share_ref_link":
+        ref_link = get_ref_link(user_id)
+        
+        markup = types.InlineKeyboardMarkup()
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="ref_program")
+        markup.add(btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.send_message(
+            call.message.chat.id,
+            f"📤 **Поделитесь ссылкой с друзьями!**\n\n"
+            f"Отправьте эту ссылку друзьям:\n"
+            f"`{ref_link}`\n\n"
+            f"Они получат **10% скидку** на первую покупку!\n"
+            f"А вы получите **100 монет** за каждого друга!",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    # ОБМЕН МОНЕТ
+    elif call.data == "coins_shop":
+        coins = get_user_coins(user_id)
+        
+        text = f"🪙 **Обмен монет**\n\n"
+        text += f"💰 У вас: **{coins} монет**\n\n"
+        text += "📦 **Доступные товары (ГАРАНТИИ НЕТ):**\n"
+        
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        
+        COINS_SHOP = {
+            "telegram_subscribers": {
+                "name": "🎁 Telegram Подписчики",
+                "id": 1537,
+                "quantity": 100,
+                "coins": 200,
+                "description": "100 подписчиков"
+            },
+            "telegram_positive": {
+                "name": "🎁 Telegram Позитивные Реакции",
+                "id": 1558,
+                "quantity": 50,
+                "coins": 200,
+                "description": "50 позитивных реакций"
+            },
+            "telegram_negative": {
+                "name": "🎁 Telegram Негативные Реакции",
+                "id": 1559,
+                "quantity": 50,
+                "coins": 200,
+                "description": "50 негативных реакций"
+            },
+            "tiktok_views": {
+                "name": "🎁 TikTok Просмотры",
+                "id": 119,
+                "quantity": 500,
+                "coins": 200,
+                "description": "500 просмотров"
+            },
+            "tiktok_likes": {
+                "name": "🎁 TikTok Лайки",
+                "id": 120,
+                "quantity": 100,
+                "coins": 100,
+                "description": "100 лайков"
+            }
+        }
+        
+        for key, item in COINS_SHOP.items():
+            text += f"\n• **{item['name']}**\n"
+            text += f"  📊 {item['description']}\n"
+            text += f"  🪙 {item['coins']} монет\n"
+            text += f"  ⚠️ Гарантии НЕТ\n"
+            
+            btn = types.InlineKeyboardButton(
+                f"🛒 {item['name']} - {item['coins']} монет",
+                callback_data=f"coin_buy_{key}"
+            )
+            markup.add(btn)
+        
+        markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="ref_program"))
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            text,
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data.startswith("coin_buy_"):
+        key = call.data.replace("coin_buy_", "")
+        
+        COINS_SHOP = {
+            "telegram_subscribers": {
+                "name": "🎁 Telegram Подписчики",
+                "id": 1537,
+                "quantity": 100,
+                "coins": 200,
+                "description": "100 подписчиков"
+            },
+            "telegram_positive": {
+                "name": "🎁 Telegram Позитивные Реакции",
+                "id": 1558,
+                "quantity": 50,
+                "coins": 200,
+                "description": "50 позитивных реакций"
+            },
+            "telegram_negative": {
+                "name": "🎁 Telegram Негативные Реакции",
+                "id": 1559,
+                "quantity": 50,
+                "coins": 200,
+                "description": "50 негативных реакций"
+            },
+            "tiktok_views": {
+                "name": "🎁 TikTok Просмотры",
+                "id": 119,
+                "quantity": 500,
+                "coins": 200,
+                "description": "500 просмотров"
+            },
+            "tiktok_likes": {
+                "name": "🎁 TikTok Лайки",
+                "id": 120,
+                "quantity": 100,
+                "coins": 100,
+                "description": "100 лайков"
+            }
+        }
+        
+        if key not in COINS_SHOP:
+            bot.answer_callback_query(call.id, "❌ Товар не найден!")
+            return
+        
+        item = COINS_SHOP[key]
+        coins = get_user_coins(user_id)
+        
+        if coins < item['coins']:
+            bot.answer_callback_query(call.id, f"❌ Недостаточно монет! Нужно {item['coins']}")
+            return
+        
+        markup = types.InlineKeyboardMarkup()
+        btn_cancel = types.InlineKeyboardButton("❌ Отмена", callback_data="coins_shop")
+        markup.add(btn_cancel)
+        
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(
+            call.message.chat.id,
+            f"📝 **Обмен монет**\n\n"
+            f"📦 {item['name']}\n"
+            f"📊 {item['description']}\n"
+            f"🪙 {item['coins']} монет\n"
+            f"⚠️ **Гарантии НЕТ!**\n\n"
+            f"🔗 Введи ссылку для накрутки:",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        
+        if not hasattr(bot, 'temp_data'):
+            bot.temp_data = {}
+        bot.temp_data[user_id] = {
+            'coin_order': True,
+            'service_id': item['id'],
+            'service_name': item['name'],
+            'quantity': item['quantity'],
+            'coins_price': item['coins']
+        }
+        
+        bot.register_next_step_handler(msg, process_coin_link)
+    
+    # ПРОМОКОДЫ
+    elif call.data == "promo_menu":
+        markup = types.InlineKeyboardMarkup()
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+        markup.add(btn_back)
+        
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(
+            call.message.chat.id,
+            "🎫 **Введите промокод:**\n\n"
+            "Промокод должен состоять из латинских букв и цифр.\n"
+            "Пример: `SUMMER2026`",
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+        bot.register_next_step_handler(msg, process_promo_code)
+    
+    # АДМИНКА
+    elif call.data == "admin_panel":
+        if user_id != ADMIN_ID:
+            bot.answer_callback_query(call.id, "❌ Нет доступа!")
+            return
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        btn1 = types.InlineKeyboardButton("💰 Пополнить баланс", callback_data="admin_add_balance")
+        btn2 = types.InlineKeyboardButton("🪙 Начислить монеты", callback_data="admin_add_coins")
+        btn3 = types.InlineKeyboardButton("📝 Отзывы", callback_data="admin_reviews")
+        btn4 = types.InlineKeyboardButton("👥 База данных", callback_data="admin_users")
+        btn5 = types.InlineKeyboardButton("📦 Заказы", callback_data="admin_orders")
+        btn6 = types.InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")
+        btn7 = types.InlineKeyboardButton("🎫 Промокоды", callback_data="admin_promocodes")
+        btn8 = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+        markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7, btn8)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "🛡️ **Админ-панель**",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    elif call.data == "admin_add_balance":
+        if user_id != ADMIN_ID:
+            return
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(call.message.chat.id, "💰 Введи сумму и ID пользователя: `100 123456789`", parse_mode="Markdown")
+        bot.register_next_step_handler(msg, process_admin_add_balance)
+    
+    elif call.data == "admin_add_coins":
+        if user_id != ADMIN_ID:
+            return
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(
+            call.message.chat.id,
+            "🪙 **Начислить монеты**\n\nВведи количество монет и ID пользователя:\nФормат: `100 123456789`",
+            parse_mode="Markdown"
+        )
+        bot.register_next_step_handler(msg, process_admin_add_coins)
+    
+    elif call.data == "admin_reviews":
+        if user_id != ADMIN_ID:
+            return
+        reviews = get_pending_reviews()
+        if not reviews:
+            bot.answer_callback_query(call.id, "Нет новых отзывов")
+            return
+        
+        for rev_id, user_id, username, rating, text, date in reviews:
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(
+                types.InlineKeyboardButton("✅ Одобрить", callback_data=f"admin_approve_{rev_id}"),
+                types.InlineKeyboardButton("❌ Отклонить", callback_data=f"admin_decline_{rev_id}")
+            )
+            bot.send_message(call.message.chat.id, f"📝 {username} (ID: {user_id})\n⭐️ {rating}\n📝 {text}", reply_markup=markup)
+        bot.answer_callback_query(call.id)
+    
+    elif call.data.startswith("admin_approve_"):
+        if user_id != ADMIN_ID:
+            return
+        review_id = int(call.data.split("_")[2])
+        approve_review(review_id)
+        bot.answer_callback_query(call.id, "✅ Одобрено!")
+    
+    elif call.data.startswith("admin_decline_"):
+        if user_id != ADMIN_ID:
+            return
+        review_id = int(call.data.split("_")[2])
+        decline_review(review_id)
+        bot.answer_callback_query(call.id, "❌ Отклонено!")
+    
+    elif call.data.startswith("admin_users"):
+        if user_id != ADMIN_ID:
+            return
+        
+        page = 0
+        if call.data == "admin_users_next":
+            page = bot.admin_users_page + 1
+        elif call.data == "admin_users_prev":
+            page = bot.admin_users_page - 1
+        if page < 0:
+            page = 0
+        
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        offset = page * 10
+        cur.execute('''
+            SELECT user_id, username, balance, coins, total_spent, reg_date, is_blocked 
+            FROM users 
+            ORDER BY reg_date DESC 
+            LIMIT 10 OFFSET ?
+        ''', (offset,))
+        users = cur.fetchall()
+        cur.execute('SELECT COUNT(*) FROM users')
+        total = cur.fetchone()[0]
+        conn.close()
+        bot.admin_users_page = page
+        
+        if not users:
+            bot.answer_callback_query(call.id, "Нет пользователей")
+            return
+        
+        total_pages = (total + 9) // 10
+        text = f"👥 **Пользователи** (стр. {page+1}/{total_pages})\n\n"
+        for user in users:
+            user_id, username, balance, coins, total_spent, reg_date, is_blocked = user
+            status = "🔴 Заблокирован" if is_blocked else "🟢 Активен"
+            text += f"🆔 {user_id}\n"
+            text += f"👤 {username or 'Нет'}\n"
+            text += f"🪙 {coins} монет | 💰 {balance:.2f} руб.\n"
+            text += f"📊 Потрачено: {total_spent:.2f} руб.\n"
+            text += f"📅 {reg_date}\n"
+            text += f"📌 {status}\n\n"
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        if page > 0:
+            markup.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="admin_users_prev"))
+        if page < total_pages - 1:
+            markup.add(types.InlineKeyboardButton("Вперёд ➡️", callback_data="admin_users_next"))
+        markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="admin_panel"))
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+    
+    elif call.data.startswith("admin_orders"):
+        if user_id != ADMIN_ID:
+            return
+        
+        page = 0
+        if call.data == "admin_orders_next":
+            page = bot.admin_orders_page + 1
+        elif call.data == "admin_orders_prev":
+            page = bot.admin_orders_page - 1
+        if page < 0:
+            page = 0
+        
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        offset = page * 10
+        cur.execute('''
+            SELECT id, user_id, service_name, quantity, price, status, date, order_id
+            FROM orders 
+            ORDER BY id DESC 
+            LIMIT 10 OFFSET ?
+        ''', (offset,))
+        orders = cur.fetchall()
+        cur.execute('SELECT COUNT(*) FROM orders')
+        total = cur.fetchone()[0]
+        conn.close()
+        bot.admin_orders_page = page
+        
+        if not orders:
+            bot.answer_callback_query(call.id, "Нет заказов")
+            return
+        
+        total_pages = (total + 9) // 10
+        text = f"📦 **Заказы** (стр. {page+1}/{total_pages})\n\n"
+        for order in orders:
+            order_id, user_id, service_name, quantity, price, status, date, api_order_id = order
+            status_emoji = {
+                'pending': '⏳',
+                'выполняется': '🔄',
+                'выполнен ✅': '✅',
+                'отменён ❌': '❌',
+                'ошибка ❌': '❌'
+            }.get(status, '❓')
+            text += f"{status_emoji} #{api_order_id} | {user_id}\n"
+            text += f"📦 {service_name[:30]}\n"
+            text += f"📊 {quantity} шт | 💰 {price:.2f} руб.\n"
+            text += f"📅 {date}\n\n"
+        
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        if page > 0:
+            markup.add(types.InlineKeyboardButton("⬅️ Назад", callback_data="admin_orders_prev"))
+        if page < total_pages - 1:
+            markup.add(types.InlineKeyboardButton("Вперёд ➡️", callback_data="admin_orders_next"))
+        markup.add(types.InlineKeyboardButton("🔙 Назад", callback_data="admin_panel"))
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=markup)
+    
+    elif call.data == "admin_stats":
+        if user_id != ADMIN_ID:
+            return
+        
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM users')
+        users_count = cur.fetchone()[0]
+        cur.execute('SELECT COUNT(*) FROM orders')
+        orders_count = cur.fetchone()[0]
+        cur.execute('SELECT SUM(price) FROM orders WHERE status = "выполнен ✅"')
+        total_revenue = cur.fetchone()[0] or 0
+        cur.execute('SELECT COUNT(*) FROM reviews WHERE is_approved = 0')
+        pending_reviews = cur.fetchone()[0]
+        cur.execute('SELECT SUM(coins) FROM users')
+        total_coins = cur.fetchone()[0] or 0
+        conn.close()
+        
+        markup = types.InlineKeyboardMarkup()
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")
+        markup.add(btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            f"📊 **Статистика**\n\n"
+            f"👤 Пользователей: {users_count}\n"
+            f"📦 Заказов: {orders_count}\n"
+            f"💰 Выручка: {total_revenue:.2f} руб.\n"
+            f"🪙 Всего монет: {total_coins}\n"
+            f"📝 Отзывов на модерации: {pending_reviews}",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
+    # НАЗАД
+    elif call.data == "back_to_start":
+        back_to_start(call)
+    
+    else:
+        bot.answer_callback_query(call.id, "⚠️ Эта функция временно недоступна")
+
+# ==================================================
+# 10. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (ОБРАБОТЧИКИ СООБЩЕНИЙ)
+# ==================================================
+
+def process_quantity(message):
+    user_id = message.from_user.id
+    try:
+        quantity = int(message.text.strip())
+        if quantity < 1 or quantity > 100000:
+            bot.send_message(message.chat.id, "❌ От 1 до 100000!")
+            return
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Введи число!")
+        return
+    
+    if not hasattr(bot, 'temp_data') or user_id not in bot.temp_data:
+        bot.send_message(message.chat.id, "❌ Ошибка! Начни заново.")
+        return
+    
+    service_id = bot.temp_data[user_id]["service_id"]
+    
+    discount = 1.0
+    discount_msg = ""
+    
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('SELECT discount_used, discount_expiry, pending_discount FROM users WHERE user_id = ?', (user_id,))
+    result = cur.fetchone()
+    conn.close()
+    
+    if result:
+        discount_used, discount_expiry, pending_discount = result
+        
+        if discount_used == 0 and discount_expiry:
+            try:
+                expiry_date = datetime.datetime.strptime(discount_expiry, "%Y-%m-%d %H:%M")
+                if expiry_date > datetime.datetime.now():
+                    discount = 0.9
+                    discount_msg = "🎁 Скидка 10% (первая покупка) применена!"
+                    conn = sqlite3.connect('bot.db')
+                    cur = conn.cursor()
+                    cur.execute('UPDATE users SET discount_used = 1 WHERE user_id = ?', (user_id,))
+                    conn.commit()
+                    conn.close()
+                else:
+                    conn = sqlite3.connect('bot.db')
+                    cur = conn.cursor()
+                    cur.execute('UPDATE users SET discount_expiry = NULL WHERE user_id = ?', (user_id,))
+                    conn.commit()
+                    conn.close()
+            except:
+                pass
+        
+        if pending_discount > 0:
+            discount = min(discount, (100 - pending_discount) / 100)
+            discount_msg += f"\n🎫 Скидка {pending_discount}% (промокод) применена!"
+            conn = sqlite3.connect('bot.db')
+            cur = conn.cursor()
+            cur.execute('UPDATE users SET pending_discount = 0 WHERE user_id = ?', (user_id,))
+            conn.commit()
+            conn.close()
+    
+    price_with_markup = get_service_price_with_markup(service_id)
+    if price_with_markup is None:
+        bot.send_message(message.chat.id, "❌ Ошибка получения цены!")
+        return
+    
+    total_price = (quantity / 1000) * price_with_markup * discount
+    balance = get_user_balance(user_id)
+    if balance < total_price:
+        bot.send_message(
+            message.chat.id,
+            f"❌ **Недостаточно средств!**\n\n"
+            f"💰 Баланс: {balance:.2f} руб.\n"
+            f"💳 Нужно: {total_price:.2f} руб."
+        )
+        return
+    
+    if discount_msg:
+        bot.send_message(message.chat.id, discount_msg)
+    
+    bot.temp_data[user_id]["quantity"] = quantity
+    bot.temp_data[user_id]["total_price"] = total_price
+    
+    msg = bot.send_message(
+        message.chat.id,
+        "📝 **Введи ссылку:**"
+    )
+    bot.register_next_step_handler(msg, process_link)
+
+def process_link(message):
+    user_id = message.from_user.id
+    link = message.text.strip()
+    if not link.startswith(('http://', 'https://')):
+        bot.send_message(message.chat.id, "❌ Ссылка должна начинаться с http:// или https://")
+        return
+    
+    if not hasattr(bot, 'temp_data') or user_id not in bot.temp_data:
+        bot.send_message(message.chat.id, "❌ Ошибка! Начни заново.")
+        return
+    
+    data = bot.temp_data[user_id]
+    service_id = data["service_id"]
+    quantity = data["quantity"]
+    total_price = data["total_price"]
+    
+    result = create_order_api(service_id, link, quantity)
+    if 'error' in result or 'order' not in result:
+        bot.send_message(
+            message.chat.id,
+            f"❌ Ошибка: {result.get('error', 'Неизвестно')}"
+        )
+        return
+    
+    order_id = result['order']
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('UPDATE users SET balance = balance - ? WHERE user_id = ?', (total_price, user_id))
+    service_name = get_service_name_by_id(service_id)
+    cur.execute('''
+        INSERT INTO orders (user_id, service_id, service_name, link, quantity, price, status, order_id, date, last_check)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, service_id, service_name, link, quantity, total_price, 'выполняется', str(order_id),
+          datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+          datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
+    conn.commit()
+    conn.close()
+    
+    del bot.temp_data[user_id]
+    bot.send_message(
+        message.chat.id,
+        f"✅ **Заказ создан!**\n\n"
+        f"📦 {service_name}\n"
+        f"📊 {quantity} шт\n"
+        f"💰 {total_price:.2f} руб.\n"
+        f"🆔 ID заказа: {order_id}\n"
+        f"⏳ Статус: выполняется"
+    )
+
+def process_crypto_deposit(message):
+    user_id = message.from_user.id
+    
+    try:
+        amount_rub = float(message.text.strip())
+        if amount_rub < 10:
+            bot.send_message(message.chat.id, "❌ Минимальная сумма: 10 руб!")
+            return
+        if amount_rub > 10000:
+            bot.send_message(message.chat.id, "❌ Максимальная сумма: 10000 руб!")
+            return
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ Введите число!")
+        return
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_usdt = types.InlineKeyboardButton("💵 USDT", callback_data=f"crypto_usdt_{amount_rub}")
+    btn_gram = types.InlineKeyboardButton("🟣 Gram", callback_data=f"crypto_gram_{amount_rub}")
+    btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="deposit")
+    markup.add(btn_usdt, btn_gram, btn_back)
+    
+    bot.send_message(
+        message.chat.id,
+        f"💰 Сумма: {amount_rub:.2f} руб\n\n"
+        f"Выбери валюту для оплаты:",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("crypto_"))
+def crypto_currency_selected(call):
+    user_id = call.from_user.id
+    data = call.data.split("_")
+    currency = data[1]
+    amount_rub = float(data[2])
+    
+    if not CRYPTOBOT_TOKEN:
+        bot.answer_callback_query(call.id, "❌ CryptoBot не настроен!")
+        return
+    
+    if currency == "USDT":
+        amount_crypto = amount_rub / 85
+    elif currency == "GRAM":
+        amount_crypto = amount_rub / 140
+    else:
+        bot.answer_callback_query(call.id, "❌ Неизвестная валюта!")
+        return
+    
+    amount_crypto = round(amount_crypto, 4)
+    
+    try:
+        url = "https://api.cryptobot.app/createInvoice"
+        headers = {
+            'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN,
+            'Content-Type': 'application/json'
+        }
+        payload = {
+            "asset": currency,
+            "amount": amount_crypto,
+            "description": f"Пополнение баланса NekroKrutka на {amount_rub} руб.",
+            "payload": json.dumps({"user_id": user_id, "amount_rub": amount_rub})
+        }
+        
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('ok'):
+                invoice_id = data['result']['invoice_id']
+                pay_url = data['result']['pay_url']
+                
+                markup = types.InlineKeyboardMarkup()
+                btn_pay = types.InlineKeyboardButton("💳 Оплатить", url=pay_url)
+                btn_check = types.InlineKeyboardButton("🔄 Проверить оплату", callback_data=f"check_payment_{invoice_id}")
+                btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="deposit")
+                markup.add(btn_pay, btn_check, btn_back)
+                
+                bot.answer_callback_query(call.id)
+                bot.edit_message_text(
+                    f"💳 **Счёт создан!**\n\n"
+                    f"💰 Сумма: {amount_rub:.2f} руб\n"
+                    f"💵 Валюта: {currency}\n"
+                    f"📊 К оплате: {amount_crypto} {currency}\n\n"
+                    f"1️⃣ Нажми 'Оплатить'\n"
+                    f"2️⃣ Оплати через CryptoBot\n"
+                    f"3️⃣ Нажми 'Проверить оплату' после оплаты\n\n"
+                    f"⚠️ Если оплата не проходит, попробуй через пару минут.",
+                    call.message.chat.id,
+                    call.message.message_id,
+                    parse_mode="Markdown",
+                    reply_markup=markup
+                )
+                return
+        print(f"❌ Ошибка CryptoBot: {response.text if response else 'Нет ответа'}")
+        bot.answer_callback_query(call.id, "❌ Ошибка создания счёта! Попробуй позже.")
+    except Exception as e:
+        print(f"❌ Ошибка создания счёта: {e}")
+        bot.answer_callback_query(call.id, "❌ Ошибка создания счёта!")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("check_payment_"))
+def check_payment(call):
+    bot.answer_callback_query(call.id, "🔄 Проверяем...")
+    bot.send_message(
+        call.message.chat.id,
+        "🔄 Проверка оплаты...\n\n"
+        "Если вы оплатили, баланс пополнится автоматически в течение минуты.\n"
+        "Если оплата не пришла — попробуйте ещё раз."
+    )
+
+def process_coin_link(message):
+    user_id = message.from_user.id
+    link = message.text.strip()
+    
+    if not link.startswith(('http://', 'https://')):
+        bot.send_message(message.chat.id, "❌ Ссылка должна начинаться с http:// или https://")
+        return
+    
+    if not hasattr(bot, 'temp_data') or user_id not in bot.temp_data:
+        bot.send_message(message.chat.id, "❌ Ошибка! Начните заново.")
+        return
+    
+    data = bot.temp_data[user_id]
+    if not data.get('coin_order'):
+        return
+    
+    service_id = data['service_id']
+    service_name = data['service_name']
+    quantity = data['quantity']
+    coins_price = data['coins_price']
+    
+    result = create_order_api(service_id, link, quantity)
+    
+    if 'error' in result or 'order' not in result:
+        bot.send_message(
+            message.chat.id,
+            f"❌ Ошибка: {result.get('error', 'Неизвестно')}"
+        )
+        return
+    
+    order_id = result['order']
+    
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    
+    cur.execute('UPDATE users SET coins = coins - ? WHERE user_id = ?', (coins_price, user_id))
+    
+    cur.execute('''
+        INSERT INTO orders (user_id, service_id, service_name, link, quantity, price, status, order_id, date, last_check)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (user_id, service_id, service_name, link, quantity, 0, 'выполняется', str(order_id),
+          datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+          datetime.datetime.now().strftime("%Y-%m-%d %H:%M")))
+    conn.commit()
+    conn.close()
+    
+    del bot.temp_data[user_id]
+    
+    bot.send_message(
+        message.chat.id,
+        f"✅ **Заказ по монетам создан!**\n\n"
+        f"📦 {service_name}\n"
+        f"📊 {quantity} шт\n"
+        f"🪙 Списано: {coins_price} монет\n"
+        f"🆔 ID заказа: {order_id}\n"
+        f"⏳ Статус: выполняется\n\n"
+        f"⚠️ Напоминаем: гарантии НЕТ!"
+    )
+
+def process_promo_code(message):
+    user_id = message.from_user.id
+    code = message.text.strip().upper()
+    
+    if not re.match(r'^[A-Z0-9]+$', code):
+        bot.send_message(message.chat.id, "❌ Промокод должен содержать только латинские буквы и цифры!")
+        return
+    
+    promo = get_promo_code(code)
+    if not promo:
+        bot.send_message(message.chat.id, "❌ Промокод не найден или неактивен!")
+        return
+    
+    result = use_promo_code(code, user_id)
+    
+    markup = types.InlineKeyboardMarkup()
+    btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+    markup.add(btn_back)
+    
+    bot.send_message(message.chat.id, result['message'], reply_markup=markup)
+
+def process_admin_add_balance(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        parts = message.text.split()
+        amount = float(parts[0])
+        user_id = int(parts[1])
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (amount, user_id))
+        conn.commit()
+        conn.close()
+        bot.send_message(message.chat.id, f"✅ Пополнено {amount} руб. для {user_id}")
+    except:
+        bot.send_message(message.chat.id, "❌ Формат: `100 123456789`")
+
+def process_admin_add_coins(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        parts = message.text.split()
+        coins = int(parts[0])
+        user_id = int(parts[1])
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('UPDATE users SET coins = coins + ? WHERE user_id = ?', (coins, user_id))
+        conn.commit()
+        conn.close()
+        bot.send_message(message.chat.id, f"✅ Начислено {coins} монет пользователю {user_id}")
+    except:
+        bot.send_message(message.chat.id, "❌ Формат: `100 123456789`")
+
+def process_review(message):
+    try:
+        text = message.text.strip()
+        match = re.match(r'^(\d+)\s+(.+)$', text)
+        if not match:
+            bot.send_message(message.chat.id, "❌ Формат: `5 Текст отзыва`")
+            return
+        rating = int(match.group(1))
+        review_text = match.group(2)
+        if rating < 1 or rating > 5:
+            bot.send_message(message.chat.id, "❌ Оценка от 1 до 5!")
+            return
+        
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO reviews (user_id, username, rating, review_text, date, is_approved)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (message.from_user.id, message.from_user.username or "Неизвестно", rating, review_text,
+              datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), 0))
+        conn.commit()
+        conn.close()
+        
+        bot.send_message(message.chat.id, "✅ Отзыв отправлен на модерацию!")
+        bot.send_message(ADMIN_ID, f"📢 Новый отзыв!\n👤 {message.from_user.first_name}\n⭐️ {rating}\n📝 {review_text}")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Ошибка: {e}")
+
+def get_service_category_path(service_id):
+    for platform_name, platform in SERVICES.items():
+        for category_name, category in platform["categories"].items():
+            for subcategory_name, services in category.items():
+                for service in services:
+                    if service["id"] == service_id:
+                        return {
+                            'platform': platform['name'],
+                            'category': category_name,
+                            'subcategory': subcategory_name
+                        }
+    return None
+
+def buy_menu(call):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    btn_tg = types.InlineKeyboardButton("✈️ Telegram", callback_data="platform_telegram")
+    btn_tt = types.InlineKeyboardButton("📱 TikTok", callback_data="platform_tiktok")
+    btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+    markup.add(btn_tg, btn_tt, btn_back)
+    
+    bot.answer_callback_query(call.id)
+    bot.edit_message_text(
+        "🛒 **Выбери платформу:**",
+        call.message.chat.id,
+        call.message.message_id,
+        parse_mode="Markdown",
+        reply_markup=markup
+    )
+
+def get_pending_reviews():
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('SELECT id, user_id, username, rating, review_text, date FROM reviews WHERE is_approved = 0')
+    reviews = cur.fetchall()
+    conn.close()
+    return reviews
+
+def approve_review(review_id):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('SELECT user_id, username, rating, review_text FROM reviews WHERE id = ?', (review_id,))
+    review = cur.fetchone()
+    if review:
+        user_id, username, rating, review_text = review
+        send_review_to_channel(username, user_id, rating, review_text)
+        cur.execute('UPDATE reviews SET is_approved = 1 WHERE id = ?', (review_id,))
         conn.commit()
         conn.close()
         return True
-    except sqlite3.IntegrityError:
-        conn.close()
-        return False
+    conn.close()
+    return False
+
+def decline_review(review_id):
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('DELETE FROM reviews WHERE id = ?', (review_id,))
+    conn.commit()
+    conn.close()
 
 def get_promo_code(code):
     conn = sqlite3.connect('bot.db')
@@ -556,13 +2028,6 @@ def get_promo_code(code):
     result = cur.fetchone()
     conn.close()
     return result
-
-def deactivate_promo_code(promo_id):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('UPDATE promocodes SET is_active = 0 WHERE id = ?', (promo_id,))
-    conn.commit()
-    conn.close()
 
 def use_promo_code(code, user_id):
     promo = get_promo_code(code)
@@ -617,148 +2082,9 @@ def use_promo_code(code, user_id):
     
     return {'success': True, 'message': f'✅ Промокод активирован!\n\n🎁 Бонус: {bonus_text}', 'bonus_type': bonus_type, 'bonus_amount': bonus_amount}
 
-def get_all_promocodes():
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('''
-        SELECT id, code, bonus_type, bonus_amount, max_uses, used_count, expires_at, is_active
-        FROM promocodes 
-        ORDER BY id DESC
-    ''')
-    result = cur.fetchall()
-    conn.close()
-    return result
-
-# ===== АДМИН-ФУНКЦИИ =====
-def get_all_users(page=0, per_page=10):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    offset = page * per_page
-    cur.execute('''
-        SELECT user_id, username, balance, coins, total_spent, reg_date, is_blocked 
-        FROM users 
-        ORDER BY reg_date DESC 
-        LIMIT ? OFFSET ?
-    ''', (per_page, offset))
-    users = cur.fetchall()
-    cur.execute('SELECT COUNT(*) FROM users')
-    total = cur.fetchone()[0]
-    conn.close()
-    return users, total
-
-def get_all_orders(page=0, per_page=10):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    offset = page * per_page
-    cur.execute('''
-        SELECT id, user_id, service_name, quantity, price, status, date, order_id
-        FROM orders 
-        ORDER BY id DESC 
-        LIMIT ? OFFSET ?
-    ''', (per_page, offset))
-    orders = cur.fetchall()
-    cur.execute('SELECT COUNT(*) FROM orders')
-    total = cur.fetchone()[0]
-    conn.close()
-    return orders, total
-
-def get_pending_reviews():
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('SELECT id, user_id, username, rating, review_text, date FROM reviews WHERE is_approved = 0')
-    reviews = cur.fetchall()
-    conn.close()
-    return reviews
-
-def approve_review(review_id):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('SELECT user_id, username, rating, review_text FROM reviews WHERE id = ?', (review_id,))
-    review = cur.fetchone()
-    if review:
-        user_id, username, rating, review_text = review
-        send_review_to_channel(username, user_id, rating, review_text)
-        cur.execute('UPDATE reviews SET is_approved = 1 WHERE id = ?', (review_id,))
-        conn.commit()
-        conn.close()
-        return True
-    conn.close()
-    return False
-
-def decline_review(review_id):
-    conn = sqlite3.connect('bot.db')
-    cur = conn.cursor()
-    cur.execute('DELETE FROM reviews WHERE id = ?', (review_id,))
-    conn.commit()
-    conn.close()
-
-# ===== МОНИТОРИНГ СТАТУСОВ =====
-def check_orders_status():
-    while True:
-        try:
-            conn = sqlite3.connect('bot.db')
-            cur = conn.cursor()
-            cur.execute('''
-                SELECT id, user_id, order_id, service_name, quantity, price, status
-                FROM orders 
-                WHERE status IN ('pending', 'выполняется', 'Awaiting', 'In progress')
-            ''')
-            orders = cur.fetchall()
-            for order in orders:
-                db_id, user_id, order_id, service_name, quantity, price, status = order
-                result = get_order_status_api(order_id)
-                if 'error' not in result:
-                    new_status = result.get('status', 'Unknown')
-                    status_display = {
-                        'In progress': 'выполняется',
-                        'Completed': 'выполнен ✅',
-                        'Awaiting': 'ожидает',
-                        'Canceled': 'отменён ❌',
-                        'Fail': 'ошибка ❌',
-                        'Partial': 'частично выполнен ⚠️'
-                    }.get(new_status, new_status)
-                    if status_display != status:
-                        cur.execute('UPDATE orders SET status = ?, last_check = ? WHERE id = ?',
-                                   (status_display, datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), db_id))
-                        conn.commit()
-                        if new_status in ['Completed', 'Canceled', 'Fail']:
-                            try:
-                                bot.send_message(
-                                    user_id,
-                                    f"📢 Статус заказа обновлён!\n\n"
-                                    f"📦 {service_name}\n"
-                                    f"📊 {quantity} шт | 💰 {price:.2f} руб\n"
-                                    f"📌 Новый статус: {status_display}"
-                                )
-                            except:
-                                pass
-            conn.close()
-        except Exception as e:
-            print(f"Ошибка мониторинга: {e}")
-        time.sleep(60)
-
-# ===== ГЛАВНОЕ МЕНЮ =====
-def get_main_menu_keyboard(user_id):
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    btn_balance = types.InlineKeyboardButton("💰 Баланс", callback_data="balance")
-    btn_buy = types.InlineKeyboardButton("🛒 Купить накрутку", callback_data="buy_menu")
-    btn_refill = types.InlineKeyboardButton("🔄 Рефилл", callback_data="refill")
-    btn_history = types.InlineKeyboardButton("📜 История заказов", callback_data="history")
-    btn_reviews = types.InlineKeyboardButton("⭐️ Отзывы", callback_data="reviews_menu")
-    btn_help = types.InlineKeyboardButton("❓ Помощь", callback_data="help")
-    btn_ref = types.InlineKeyboardButton("👥 Реферальная программа", callback_data="ref_program")
-    btn_promo = types.InlineKeyboardButton("🎫 Промокод", callback_data="promo_menu")
-    btn_settings = types.InlineKeyboardButton("⚙️ Настройки", callback_data="settings_menu")
-    
-    if user_id == ADMIN_ID:
-        btn_admin = types.InlineKeyboardButton("🛡️ Админ-панель", callback_data="admin_panel")
-        markup.add(btn_balance, btn_buy, btn_refill, btn_history, btn_reviews, btn_help, btn_ref, btn_promo, btn_settings, btn_admin)
-    else:
-        markup.add(btn_balance, btn_buy, btn_refill, btn_history, btn_reviews, btn_help, btn_ref, btn_promo, btn_settings)
-    
-    return markup
-
-# ===== КОМАНДА /START =====
+# ==================================================
+# 11. КОМАНДА /START
+# ==================================================
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
@@ -826,7 +2152,6 @@ def start(message):
     
     show_channels_and_menu(message.chat.id, user_id)
 
-# ===== КАПЧА =====
 @bot.callback_query_handler(func=lambda call: call.data.startswith("captcha_"))
 def captcha_handler(call):
     user_id = call.from_user.id
@@ -860,7 +2185,6 @@ def captcha_handler(call):
     bot.delete_message(call.message.chat.id, call.message.message_id)
     show_channels_and_menu(call.message.chat.id, user_id)
 
-# ===== ПОКАЗ КАНАЛОВ И МЕНЮ =====
 def show_channels_and_menu(chat_id, user_id):
     markup = types.InlineKeyboardMarkup(row_width=2)
     btn1 = types.InlineKeyboardButton("📢 Канал с новостями", url="https://t.me/NekroChanell")
@@ -878,194 +2202,9 @@ def show_channels_and_menu(chat_id, user_id):
         reply_markup=markup
     )
 
-# ===== ОБРАБОТКА CRYPTOBOT =====
-def create_crypto_invoice(amount_rub, currency, user_id):
-    if not CRYPTOBOT_TOKEN:
-        return None
-    
-    if currency == "USDT":
-        amount_crypto = amount_rub / 85
-    elif currency == "GRAM":
-        amount_crypto = amount_rub / 140
-    else:
-        return None
-    
-    amount_crypto = round(amount_crypto, 4)
-    
-    try:
-        url = "https://api.cryptobot.app/createInvoice"
-        headers = {
-            'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN,
-            'Content-Type': 'application/json'
-        }
-        payload = {
-            "asset": currency,
-            "amount": amount_crypto,
-            "description": f"Пополнение баланса NekroKrutka на {amount_rub} руб.",
-            "payload": json.dumps({"user_id": user_id, "amount_rub": amount_rub})
-        }
-        
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
-        
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('ok'):
-                return {
-                    'invoice_id': data['result']['invoice_id'],
-                    'pay_url': data['result']['pay_url'],
-                    'amount_crypto': amount_crypto,
-                    'currency': currency
-                }
-        print(f"❌ Ошибка CryptoBot: {response.text}")
-        return None
-    except Exception as e:
-        print(f"❌ Ошибка создания счёта: {e}")
-        return None
-
-def process_crypto_deposit(message):
-    user_id = message.from_user.id
-    
-    try:
-        amount_rub = float(message.text.strip())
-        if amount_rub < 10:
-            bot.send_message(message.chat.id, "❌ Минимальная сумма: 10 руб!")
-            return
-        if amount_rub > 10000:
-            bot.send_message(message.chat.id, "❌ Максимальная сумма: 10000 руб!")
-            return
-    except ValueError:
-        bot.send_message(message.chat.id, "❌ Введите число!")
-        return
-    
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_usdt = types.InlineKeyboardButton("💵 USDT", callback_data=f"crypto_usdt_{amount_rub}")
-    btn_gram = types.InlineKeyboardButton("🟣 Gram", callback_data=f"crypto_gram_{amount_rub}")
-    btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="deposit")
-    markup.add(btn_usdt, btn_gram, btn_back)
-    
-    bot.send_message(
-        message.chat.id,
-        f"💰 Сумма: {amount_rub:.2f} руб\n\n"
-        f"Выбери валюту для оплаты:",
-        reply_markup=markup
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("crypto_"))
-def crypto_currency_selected(call):
-    user_id = call.from_user.id
-    data = call.data.split("_")
-    currency = data[1]
-    amount_rub = float(data[2])
-    
-    invoice = create_crypto_invoice(amount_rub, currency, user_id)
-    
-    if not invoice:
-        bot.answer_callback_query(call.id, "❌ Ошибка создания счёта! Попробуй позже.")
-        return
-    
-    markup = types.InlineKeyboardMarkup()
-    btn_pay = types.InlineKeyboardButton("💳 Оплатить", url=invoice['pay_url'])
-    btn_check = types.InlineKeyboardButton("🔄 Проверить оплату", callback_data=f"check_payment_{invoice['invoice_id']}")
-    btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="deposit")
-    markup.add(btn_pay, btn_check, btn_back)
-    
-    bot.answer_callback_query(call.id)
-    bot.edit_message_text(
-        f"💳 **Счёт создан!**\n\n"
-        f"💰 Сумма: {amount_rub:.2f} руб\n"
-        f"💵 Валюта: {currency}\n"
-        f"📊 К оплате: {invoice['amount_crypto']} {currency}\n\n"
-        f"1️⃣ Нажми 'Оплатить'\n"
-        f"2️⃣ Оплати через CryptoBot\n"
-        f"3️⃣ Нажми 'Проверить оплату' после оплаты\n\n"
-        f"⚠️ Если оплата не проходит, попробуй через пару минут.",
-        call.message.chat.id,
-        call.message.message_id,
-        parse_mode="Markdown",
-        reply_markup=markup
-    )
-
-@bot.callback_query_handler(func=lambda call: call.data.startswith("check_payment_"))
-def check_payment(call):
-    bot.answer_callback_query(call.id, "🔄 Проверяем...")
-    bot.send_message(
-        call.message.chat.id,
-        "🔄 Проверка оплаты...\n\n"
-        "Если вы оплатили, баланс пополнится автоматически в течение минуты.\n"
-        "Если оплата не пришла — попробуйте ещё раз."
-    )
-
-# ===== СТРУКТУРА УСЛУГ =====
-SERVICES = {
-    "telegram": {
-        "name": "✈️ Telegram",
-        "categories": {
-            "Подписчики": {
-                "С гарантией": [
-                    {"id": 1631, "name": "⭐️ Telegram Подписчики [1+ день без списаний ♻️] [Моментальные]"},
-                    {"id": 1583, "name": "⭐️ Telegram Подписчики [3 дня без списаний ♻️] [Моментальные]"},
-                    {"id": 1585, "name": "⭐️ Telegram Подписчики [7 дней без списаний ♻️] [Моментальные]"},
-                    {"id": 1580, "name": "⭐️ Telegram Подписчики [Навсегда без списаний ♻️] [Моментальные]"},
-                ],
-                "Без гарантии": [
-                    {"id": 1900, "name": "Telegram Подписчики [Без гарантии] [Моментальный старт]"},
-                    {"id": 1630, "name": "Telegram Подписчики [Без гарантии ⛔️] [Рефилл 30 дней ♻️]"},
-                ]
-            },
-            "Реакции": {
-                "С просмотрами": [
-                    {"id": 1670, "name": "Telegram Позитивные Реакции [👍🤩🎉🔥❤️🥰👏🏻🥳😍❤️‍🔥💯] + Просмотры"},
-                    {"id": 1671, "name": "Telegram Негативные Реакции [🖕💔👎😢💩🤮🤬😡🥱🍌😈] + Просмотры"},
-                ],
-                "Без просмотров": [
-                    {"id": 1574, "name": "Telegram Позитивные Реакции [👍🎉🔥❤️🥰🤩👏🏻]"},
-                    {"id": 1535, "name": "Telegram Реакция [👍❤️🔥🎉]"},
-                    {"id": 1536, "name": "Telegram Реакция [👎💩😱😢]"},
-                    {"id": 1499, "name": "Telegram Негативные Реакции [👎💩🤮🤔🤯😁😢🤬]"},
-                ]
-            },
-            "Просмотры": {
-                "Все": [
-                    {"id": 1547, "name": "⭐ Telegram Просмотры на пост [Быстрый старт]"},
-                    {"id": 1548, "name": "Telegram Просмотры на пост [Моментальные]"},
-                ]
-            }
-        }
-    },
-    "tiktok": {
-        "name": "📱 TikTok",
-        "categories": {
-            "Просмотры": {
-                "С гарантией": [
-                    {"id": 1609, "name": "TikTok Просмотры [Моментальный старт] [Гарантия 30 дней ♻️]"},
-                ],
-                "Без гарантии": [
-                    {"id": 1617, "name": "TikTok Просмотры [Моментальный старт] [Без гарантии ⛔]"},
-                ]
-            },
-            "Лайки": {
-                "С гарантией": [
-                    {"id": 172, "name": "⭐️ TikTok Лайки [Моментальные] [Гарантия 30 дней♻️]"},
-                ],
-                "Без гарантии": [
-                    {"id": 110, "name": "⭐️ TikTok Лайки [Моментальные] [Без гарантии⛔️]"},
-                ]
-            },
-            "Репосты/Сохранения": {
-                "Все": [
-                    {"id": 1640, "name": "TikTok Поделиться [Без списаний]"},
-                    {"id": 1641, "name": "TikTok Сохранения [Без списаний ♻️]"},
-                ]
-            }
-        }
-    }
-}
-
-# ===== ОСТАЛЬНЫЕ ОБРАБОТЧИКИ =====
-# Функции для кнопок (история, рефилл, отзывы, админка, промокоды и т.д.)
-# Для краткости я их не копирую, но в финальном коде они все есть
-
-# ===== НАЗАД В ГЛАВНОЕ МЕНЮ =====
+# ==================================================
+# 12. НАЗАД В ГЛАВНОЕ МЕНЮ
+# ==================================================
 @bot.callback_query_handler(func=lambda call: call.data == "back_to_start")
 def back_to_start(call):
     user_id = call.from_user.id
@@ -1086,7 +2225,9 @@ def back_to_start(call):
         bot.answer_callback_query(call.id)
         bot.send_message(call.message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
 
-# ===== ЗАПУСК =====
+# ==================================================
+# 13. ЗАПУСК
+# ==================================================
 if __name__ == "__main__":
     import threading
 
@@ -1095,17 +2236,21 @@ if __name__ == "__main__":
     print(f"📱 Бот: @{BOT_USERNAME}")
     print(f"📢 Канал: {CHANNEL_ID}")
 
+    # Удаляем старый webhook (если был)
+    try:
+        bot.delete_webhook()
+        print("✅ Webhook удалён!")
+    except:
+        pass
+
+    # Устанавливаем webhook на текущий URL
+    webhook_url = "https://nekrokrutka-bot.onrender.com/webhook"
+    bot.set_webhook(url=webhook_url)
+    print(f"✅ Webhook установлен: {webhook_url}")
+
     monitor_thread = threading.Thread(target=check_orders_status, daemon=True)
     monitor_thread.start()
     print("🔄 Мониторинг статусов запущен!")
 
-    def run_bot():
-        bot.infinity_polling()
-
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    print("🤖 Бот запущен в режиме polling")
-
     port = int(os.environ.get("PORT", 5000))
     flask_app.run(host='0.0.0.0', port=port)
-    
