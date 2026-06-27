@@ -93,8 +93,8 @@ def crypto_webhook():
 # 3. ПОЛУЧЕНИЕ КУРСА ИЗ CRYPTOBOT
 # ==================================================
 def get_crypto_rates():
-    """Получает актуальный курс USDT и GRAM из CryptoBot"""
-    default_rates = {"USDT": 85.0, "GRAM": 140.0}
+    """Получает актуальный курс USDT из CryptoBot"""
+    default_rates = {"USDT": 85.0}
 
     if not CRYPTOBOT_TOKEN:
         print("⚠️ CRYPTOBOT_TOKEN не найден, используются курсы по умолчанию.")
@@ -111,18 +111,11 @@ def get_crypto_rates():
         if response.status_code == 200:
             data = response.json()
             if data.get('ok'):
-                rates = {}
                 for rate in data.get('result', []):
                     if rate.get('source') == 'USDT' and rate.get('target') == 'RUB':
-                        rates['USDT'] = float(rate.get('rate', 0))
-                    elif rate.get('source') == 'GRAM' and rate.get('target') == 'RUB':
-                        rates['GRAM'] = float(rate.get('rate', 0))
-                
-                if rates.get('USDT') and rates.get('GRAM'):
-                    print(f"✅ Курсы обновлены: USDT={rates['USDT']}, GRAM={rates['GRAM']}")
-                    return rates
-                else:
-                    return default_rates
+                        print(f"✅ Курс USDT обновлён: {rate.get('rate')}")
+                        return {"USDT": float(rate.get('rate', 0))}
+                return default_rates
             else:
                 return default_rates
         else:
@@ -231,6 +224,17 @@ def init_db():
         CREATE TABLE IF NOT EXISTS review_counter (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             counter INTEGER DEFAULT 0
+        )
+    ''')
+    
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS custom_services (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            service_id INTEGER UNIQUE,
+            name TEXT,
+            price REAL,
+            category TEXT,
+            subcategory TEXT
         )
     ''')
     
@@ -373,12 +377,23 @@ def refill_order_api(order_id):
         return {"error": str(e)}
 
 def get_service_name_by_id(service_id):
+    # Проверяем встроенные услуги
     for platform in SERVICES.values():
         for category in platform["categories"].values():
             for subcategory in category.values():
                 for service in subcategory:
                     if service["id"] == service_id:
                         return service["name"]
+    
+    # Проверяем пользовательские услуги
+    conn = sqlite3.connect('bot.db')
+    cur = conn.cursor()
+    cur.execute('SELECT name FROM custom_services WHERE service_id = ?', (service_id,))
+    result = cur.fetchone()
+    conn.close()
+    if result:
+        return result[0]
+    
     return f"Услуга #{service_id}"
 
 def parse_guarantee(service_name):
@@ -469,7 +484,14 @@ def get_next_review_number():
 
 def send_review_to_channel(username, user_id, rating, review_text):
     try:
-        review_number = get_next_review_number()
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('UPDATE review_counter SET counter = counter + 1 WHERE id = 1')
+        cur.execute('SELECT counter FROM review_counter WHERE id = 1')
+        review_number = cur.fetchone()[0]
+        conn.commit()
+        conn.close()
+
         date = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
         text = (
             f"⭐️ **Отзыв #{review_number}**\n\n"
@@ -481,7 +503,7 @@ def send_review_to_channel(username, user_id, rating, review_text):
         bot.send_message(CHANNEL_ID, text, parse_mode="Markdown")
         return True
     except Exception as e:
-        print(f"Ошибка отправки в канал: {e}")
+        print(f"❌ Ошибка отправки в канал: {e}")
         return False
 
 def get_referral_stats(user_id):
@@ -640,15 +662,15 @@ def get_pending_reviews():
 def approve_review(review_id):
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
-    cur.execute('SELECT user_id, username, rating, review_text FROM reviews WHERE id = ?', (review_id,))
+    cur.execute('SELECT user_id, username, rating, review_text FROM reviews WHERE id = ? AND is_approved = 0', (review_id,))
     review = cur.fetchone()
     if review:
         user_id, username, rating, review_text = review
-        send_review_to_channel(username, user_id, rating, review_text)
-        cur.execute('UPDATE reviews SET is_approved = 1 WHERE id = ?', (review_id,))
-        conn.commit()
-        conn.close()
-        return True
+        if send_review_to_channel(username, user_id, rating, review_text):
+            cur.execute('UPDATE reviews SET is_approved = 1 WHERE id = ?', (review_id,))
+            conn.commit()
+            conn.close()
+            return True
     conn.close()
     return False
 
@@ -963,8 +985,6 @@ def main_callback_handler(call):
         text = f"📊 **Твой уровень:** {levels_ru.get(level, 'Новичок')}\n"
         text += f"📉 **Скидка:** {discount}%\n"
         text += f"💰 **Потрачено:** {total_spent:.2f} руб.\n\n"
-        
-        # ОПИСАНИЕ ВСЕХ УРОВНЕЙ
         text += "━" * 25 + "\n\n"
         text += "📊 **ВСЕ УРОВНИ:**\n\n"
         text += "🟢 **Новичок** — 0% скидка\n"
@@ -1046,21 +1066,20 @@ def main_callback_handler(call):
             reply_markup=markup
         )
     
-    # ----- CRYPTOBOT -----
+    # ----- CRYPTOBOT (ФИКС) -----
     elif call.data == "deposit_crypto":
         rates = get_crypto_rates()
-        
+        usdt_rate = rates.get("USDT", 85.0) + 15
+
         markup = types.InlineKeyboardMarkup()
         btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="deposit")
         markup.add(btn_back)
-        
+
         bot.answer_callback_query(call.id)
         msg = bot.send_message(
             call.message.chat.id,
             f"💳 **Пополнение через CryptoBot**\n\n"
-            f"💰 Актуальные курсы (CryptoBot):\n"
-            f"• USDT — 1 USDT = {rates['USDT']} руб\n"
-            f"• Gram (GRAM) — 1 GRAM = {rates['GRAM']} руб\n\n"
+            f"💰 Курс USDT: 1 USDT = {usdt_rate:.2f} руб\n\n"
             f"📌 Минимальная сумма: 10 руб\n"
             f"📌 Максимальная сумма: 10000 руб\n\n"
             f"💳 Введите сумму в рублях:",
@@ -1178,6 +1197,16 @@ def main_callback_handler(call):
         _, platform, category, subcategory = call.data.split("_", 3)
         services_list = SERVICES[platform]["categories"][category][subcategory]
         
+        # Добавляем пользовательские услуги в эту категорию
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('SELECT service_id, name, price FROM custom_services WHERE category = ? AND subcategory = ?', (category, subcategory))
+        custom_services = cur.fetchall()
+        conn.close()
+        
+        for service_id, name, price in custom_services:
+            services_list.append({"id": service_id, "name": name})
+        
         markup = types.InlineKeyboardMarkup(row_width=1)
         for service in services_list:
             btn = types.InlineKeyboardButton(
@@ -1201,12 +1230,22 @@ def main_callback_handler(call):
         service_id = int(call.data.split("_")[1])
         service_name = get_service_name_by_id(service_id)
         price_with_markup = get_service_price_with_markup(service_id)
+        
+        # Если цена не найдена в API, проверяем пользовательские услуги
+        if price_with_markup is None:
+            conn = sqlite3.connect('bot.db')
+            cur = conn.cursor()
+            cur.execute('SELECT price FROM custom_services WHERE service_id = ?', (service_id,))
+            result = cur.fetchone()
+            conn.close()
+            if result:
+                price_with_markup = result[0]
+            else:
+                bot.answer_callback_query(call.id, "❌ Ошибка получения цены!")
+                return
+        
         category_path = get_service_category_path(service_id)
         guarantee_info = parse_guarantee(service_name)
-        
-        if price_with_markup is None:
-            bot.answer_callback_query(call.id, "❌ Ошибка получения цены!")
-            return
         
         text = f"📦 **{service_name}**\n\n"
         text += f"📊 1000 единиц — {price_with_markup:.2f} руб.\n"
@@ -1222,7 +1261,6 @@ def main_callback_handler(call):
         if category_path:
             text += f"📌 Категория: {category_path['platform']} → {category_path['category']} → {category_path['subcategory']}\n"
         
-        # ДОБАВЛЯЕМ ТЕКСТ ПРО ПУБЛИЧНЫЙ КАНАЛ И ПОМОЩЬ
         text += "\n" + "━" * 25 + "\n\n"
         text += "📢 **Важно!**\n"
         text += "🔗 Ссылка должна вести на **публичный канал**.\n"
@@ -1382,7 +1420,7 @@ def main_callback_handler(call):
             parse_mode="Markdown"
         )
     
-    # ----- ОТЗЫВЫ -----
+    # ----- ОТЗЫВЫ (ФИКС) -----
     elif call.data == "reviews_menu":
         markup = types.InlineKeyboardMarkup(row_width=2)
         btn_add = types.InlineKeyboardButton("✏️ Оставить отзыв", callback_data="review_add")
@@ -1427,7 +1465,7 @@ def main_callback_handler(call):
         conn.close()
         
         if not reviews:
-            text = "📝 Отзывов пока нет."
+            text = "📝 Одобренных отзывов пока нет."
         else:
             text = "⭐️ **Отзывы:**\n\n"
             for username, rating, review_text, date in reviews:
@@ -1829,8 +1867,9 @@ def main_callback_handler(call):
         btn10 = types.InlineKeyboardButton("⚫ Чёрный список", callback_data="admin_blacklist")
         btn11 = types.InlineKeyboardButton("📥 Экспорт данных", callback_data="admin_export")
         btn12 = types.InlineKeyboardButton("➕ Добавить услугу", callback_data="admin_add_service")
-        btn13 = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
-        markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7, btn8, btn9, btn10, btn11, btn12, btn13)
+        btn13 = types.InlineKeyboardButton("➖ Удалить услугу", callback_data="admin_remove_service")
+        btn14 = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+        markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7, btn8, btn9, btn10, btn11, btn12, btn13, btn14)
         
         bot.answer_callback_query(call.id)
         bot.edit_message_text(
@@ -1964,8 +2003,10 @@ def main_callback_handler(call):
         if user_id != ADMIN_ID:
             return
         review_id = int(call.data.split("_")[2])
-        approve_review(review_id)
-        bot.answer_callback_query(call.id, "✅ Одобрено!")
+        if approve_review(review_id):
+            bot.answer_callback_query(call.id, "✅ Отзыв одобрен и отправлен в канал!")
+        else:
+            bot.answer_callback_query(call.id, "❌ Ошибка при одобрении отзыва!")
     
     elif call.data.startswith("admin_decline_"):
         if user_id != ADMIN_ID:
@@ -2217,21 +2258,28 @@ def main_callback_handler(call):
     elif call.data == "admin_add_service":
         if user_id != ADMIN_ID:
             return
-        
-        markup = types.InlineKeyboardMarkup()
-        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")
-        markup.add(btn_back)
-        
         bot.answer_callback_query(call.id)
-        bot.edit_message_text(
-            "➕ **Добавление услуги**\n\n"
-            "ℹ️ Добавление услуги будет доступно в следующем обновлении.\n\n"
-            "Сейчас можно только редактировать файл `SERVICES` в коде.",
+        msg = bot.send_message(
             call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown",
-            reply_markup=markup
+            "➕ **Добавление услуги**\n\n"
+            "Введите данные в формате:\n"
+            "`ID | Название | Цена_за_1000 | Категория | Подкатегория`\n\n"
+            "Пример:\n"
+            "`2000 | Telegram Подписчики | 150 | Подписчики | С гарантией`"
         )
+        bot.register_next_step_handler(msg, process_add_service)
+    
+    elif call.data == "admin_remove_service":
+        if user_id != ADMIN_ID:
+            return
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(
+            call.message.chat.id,
+            "➖ **Удаление услуги**\n\n"
+            "Введите ID услуги, которую нужно удалить:\n"
+            "Пример: `2000`"
+        )
+        bot.register_next_step_handler(msg, process_remove_service)
     
     elif call.data == "admin_export":
         if user_id != ADMIN_ID:
@@ -2242,7 +2290,6 @@ def main_callback_handler(call):
         conn = sqlite3.connect('bot.db')
         cur = conn.cursor()
         
-        # Собираем все данные
         users = cur.execute('SELECT * FROM users').fetchall()
         orders = cur.execute('SELECT * FROM orders').fetchall()
         reviews = cur.execute('SELECT * FROM reviews').fetchall()
@@ -2251,7 +2298,6 @@ def main_callback_handler(call):
         
         conn.close()
         
-        # Создаём TXT файл
         date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         
         txt_content = "=" * 50 + "\n"
@@ -2296,7 +2342,6 @@ def main_callback_handler(call):
             caption=f"📥 **Экспорт данных**\n\n📅 Дата: {date}\n📊 Формат: TXT"
         )
     
-    # ----- НАЗАД -----
     elif call.data == "back_to_start":
         back_to_start(call)
     
@@ -2458,28 +2503,20 @@ def process_crypto_deposit(message):
         return
     
     rates = get_crypto_rates()
+    usdt_rate = rates.get("USDT", 85.0) + 15
     
-    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup = types.InlineKeyboardMarkup(row_width=1)
     btn_usdt = types.InlineKeyboardButton(
-        f"💵 USDT (1 USDT = {rates['USDT'] - 10} руб)",
+        f"💵 USDT (1 USDT = {usdt_rate:.2f} руб)",
         callback_data=f"crypto_usdt_{amount_rub}"
     )
-    btn_gram = types.InlineKeyboardButton(
-        f"🟣 Gram (1 GRAM = {rates['GRAM'] - 15} руб)",
-        callback_data=f"crypto_gram_{amount_rub}"
-    )
     btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="deposit")
-    markup.add(btn_usdt, btn_gram, btn_back)
+    markup.add(btn_usdt, btn_back)
     
     bot.send_message(
         message.chat.id,
         f"💰 Сумма: {amount_rub:.2f} руб\n\n"
-        f"💰 Актуальные курсы (CryptoBot):\n"
-        f"• USDT — 1 USDT = {rates['USDT']} руб\n"
-        f"• Gram (GRAM) — 1 GRAM = {rates['GRAM']} руб\n\n"
-        f"💳 **Твой доход:**\n"
-        f"• С USDT: +10 руб с каждой единицы\n"
-        f"• С GRAM: +15 руб с каждой единицы\n\n"
+        f"💰 Курс USDT: 1 USDT = {usdt_rate:.2f} руб\n\n"
         f"📌 Выбери валюту для оплаты:",
         reply_markup=markup
     )
@@ -2496,15 +2533,10 @@ def crypto_currency_selected(call):
         return
     
     rates = get_crypto_rates()
+    usdt_rate = rates.get("USDT", 85.0) + 15
     
     if currency == "USDT":
-        real_rate = rates["USDT"] - 10
-        amount_crypto = amount_rub / real_rate
-        currency_name = "USDT"
-    elif currency == "GRAM":
-        real_rate = rates["GRAM"] - 15
-        amount_crypto = amount_rub / real_rate
-        currency_name = "GRAM"
+        amount_crypto = amount_rub / usdt_rate
     else:
         bot.answer_callback_query(call.id, "❌ Неизвестная валюта!")
         return
@@ -2518,13 +2550,12 @@ def crypto_currency_selected(call):
             'Content-Type': 'application/json'
         }
         payload = {
-            "asset": currency,
+            "asset": "USDT",
             "amount": amount_crypto,
             "description": f"Пополнение баланса NekroKrutka на {amount_rub} руб.",
             "payload": json.dumps({
                 "user_id": user_id,
-                "amount_rub": amount_rub,
-                "real_rate": real_rate
+                "amount_rub": amount_rub
             })
         }
         
@@ -2546,9 +2577,9 @@ def crypto_currency_selected(call):
                 bot.edit_message_text(
                     f"💳 **Счёт создан!**\n\n"
                     f"💰 Сумма: {amount_rub:.2f} руб\n"
-                    f"💵 Валюта: {currency_name}\n"
-                    f"📊 К оплате: {amount_crypto} {currency_name}\n"
-                    f"📈 Курс: 1 {currency_name} = {real_rate:.2f} руб (с учётом дохода)\n\n"
+                    f"💵 Валюта: USDT\n"
+                    f"📊 К оплате: {amount_crypto} USDT\n"
+                    f"📈 Курс: 1 USDT = {usdt_rate:.2f} руб\n\n"
                     f"1️⃣ Нажми 'Оплатить'\n"
                     f"2️⃣ Оплати через CryptoBot\n"
                     f"3️⃣ Нажми 'Проверить оплату' после оплаты\n\n"
@@ -2883,6 +2914,44 @@ def admin_promo_expiry(message):
         bot.send_message(message.chat.id, "❌ Ошибка! Возможно, такой промокод уже существует.")
     
     del bot.temp_promo[user_id]
+
+def process_add_service(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        parts = [p.strip() for p in message.text.split('|')]
+        if len(parts) != 5:
+            bot.send_message(message.chat.id, "❌ Неверный формат! Нужно 5 полей через `|`")
+            return
+        service_id, name, price, category, subcategory = parts
+        price = float(price)
+
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT OR REPLACE INTO custom_services (service_id, name, price, category, subcategory)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (int(service_id), name, price, category, subcategory))
+        conn.commit()
+        conn.close()
+
+        bot.send_message(message.chat.id, f"✅ Услуга **{name}** (ID: {service_id}) добавлена!")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Ошибка: {e}")
+
+def process_remove_service(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        service_id = int(message.text.strip())
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('DELETE FROM custom_services WHERE service_id = ?', (service_id,))
+        conn.commit()
+        conn.close()
+        bot.send_message(message.chat.id, f"✅ Услуга с ID {service_id} удалена!")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Ошибка: {e}")
 
 def buy_menu(call):
     markup = types.InlineKeyboardMarkup(row_width=2)
