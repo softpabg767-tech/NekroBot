@@ -75,7 +75,12 @@ def crypto_webhook():
             
             try:
                 new_balance = get_user_balance(user_id)
-                bot.send_message(user_id, f"✅ Пополнение на {amount_rub} руб. успешно! Новый баланс: {new_balance:.2f} руб.")
+                bot.send_message(
+                    user_id,
+                    f"✅ **Пополнение успешно!**\n\n"
+                    f"💰 Сумма: {amount_rub:.2f} руб.\n"
+                    f"📊 Новый баланс: {new_balance:.2f} руб."
+                )
             except:
                 pass
             return jsonify({'status': 'ok'}), 200
@@ -85,7 +90,49 @@ def crypto_webhook():
         return jsonify({'status': 'error'}), 500
 
 # ==================================================
-# 3. БАЗА ДАННЫХ
+# 3. ПОЛУЧЕНИЕ КУРСА ИЗ CRYPTOBOT
+# ==================================================
+def get_crypto_rates():
+    """Получает актуальный курс USDT и GRAM из CryptoBot"""
+    default_rates = {"USDT": 85.0, "GRAM": 140.0}
+
+    if not CRYPTOBOT_TOKEN:
+        print("⚠️ CRYPTOBOT_TOKEN не найден, используются курсы по умолчанию.")
+        return default_rates
+
+    try:
+        url = "https://pay.crypt.bot/api/getExchangeRates"
+        headers = {
+            'Crypto-Pay-API-Token': CRYPTOBOT_TOKEN,
+            'Content-Type': 'application/json'
+        }
+        response = requests.post(url, headers=headers, timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('ok'):
+                rates = {}
+                for rate in data.get('result', []):
+                    if rate.get('source') == 'USDT' and rate.get('target') == 'RUB':
+                        rates['USDT'] = float(rate.get('rate', 0))
+                    elif rate.get('source') == 'GRAM' and rate.get('target') == 'RUB':
+                        rates['GRAM'] = float(rate.get('rate', 0))
+                
+                if rates.get('USDT') and rates.get('GRAM'):
+                    print(f"✅ Курсы обновлены: USDT={rates['USDT']}, GRAM={rates['GRAM']}")
+                    return rates
+                else:
+                    return default_rates
+            else:
+                return default_rates
+        else:
+            return default_rates
+    except Exception as e:
+        print(f"❌ Ошибка получения курсов: {e}")
+        return default_rates
+
+# ==================================================
+# 4. БАЗА ДАННЫХ
 # ==================================================
 def init_db():
     conn = sqlite3.connect('bot.db')
@@ -195,7 +242,7 @@ def init_db():
 init_db()
 
 # ==================================================
-# 4. ОСНОВНЫЕ ФУНКЦИИ
+# 5. ОСНОВНЫЕ ФУНКЦИИ
 # ==================================================
 def get_user_balance(user_id):
     conn = sqlite3.connect('bot.db')
@@ -670,7 +717,7 @@ def check_orders_status():
         time.sleep(60)
 
 # ==================================================
-# 5. СТРУКТУРА УСЛУГ
+# 6. СТРУКТУРА УСЛУГ
 # ==================================================
 SERVICES = {
     "telegram": {
@@ -679,7 +726,7 @@ SERVICES = {
             "Подписчики": {
                 "С гарантией": [
                     {"id": 1631, "name": "⭐️ Telegram Подписчики [1+ день без списаний ♻️] [Моментальные]"},
-                    {"id": 1583, "name": "⭐️ Telegram Подписчики [3 дня без списаций ♻️] [Моментальные]"},
+                    {"id": 1583, "name": "⭐️ Telegram Подписчики [3 дня без списаний ♻️] [Моментальные]"},
                     {"id": 1585, "name": "⭐️ Telegram Подписчики [7 дней без списаний ♻️] [Моментальные]"},
                     {"id": 1580, "name": "⭐️ Telegram Подписчики [Навсегда без списаний ♻️] [Моментальные]"},
                 ],
@@ -738,7 +785,7 @@ SERVICES = {
 }
 
 # ==================================================
-# 6. ГЛАВНОЕ МЕНЮ
+# 7. ГЛАВНОЕ МЕНЮ
 # ==================================================
 def get_main_menu_keyboard(user_id):
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -762,7 +809,7 @@ def get_main_menu_keyboard(user_id):
     return markup
 
 # ==================================================
-# 7. КОМАНДА /START
+# 8. КОМАНДА /START
 # ==================================================
 @bot.message_handler(commands=['start'])
 def start(message):
@@ -882,7 +929,7 @@ def show_channels_and_menu(chat_id, user_id):
     )
 
 # ==================================================
-# 8. ОБРАБОТЧИКИ КНОПОК
+# 9. ОБРАБОТЧИКИ КНОПОК
 # ==================================================
 @bot.callback_query_handler(func=lambda call: True)
 def main_callback_handler(call):
@@ -916,6 +963,18 @@ def main_callback_handler(call):
         text = f"📊 **Твой уровень:** {levels_ru.get(level, 'Новичок')}\n"
         text += f"📉 **Скидка:** {discount}%\n"
         text += f"💰 **Потрачено:** {total_spent:.2f} руб.\n\n"
+        
+        # ОПИСАНИЕ ВСЕХ УРОВНЕЙ
+        text += "━" * 25 + "\n\n"
+        text += "📊 **ВСЕ УРОВНИ:**\n\n"
+        text += "🟢 **Новичок** — 0% скидка\n"
+        text += "   ➜ Доступен сразу после регистрации\n\n"
+        text += "🟡 **Продвинутый** — 3.5% скидка\n"
+        text += "   ➜ Потрать **50 руб** в боте\n\n"
+        text += "🔴 **VIP** — 5% скидка\n"
+        text += "   ➜ Потрать **150 руб** в боте\n\n"
+        text += "⚫ **Реселлер** — 10% скидка\n"
+        text += "   ➜ Выдаётся администратором\n\n"
         
         if level == "novice":
             text += "⬆️ Потрать **50 руб**, чтобы получить уровень **Продвинутый** (3.5% скидка)"
@@ -987,8 +1046,10 @@ def main_callback_handler(call):
             reply_markup=markup
         )
     
-    # ----- CRYPTOBOT (работает!) -----
+    # ----- CRYPTOBOT -----
     elif call.data == "deposit_crypto":
+        rates = get_crypto_rates()
+        
         markup = types.InlineKeyboardMarkup()
         btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="deposit")
         markup.add(btn_back)
@@ -996,13 +1057,16 @@ def main_callback_handler(call):
         bot.answer_callback_query(call.id)
         msg = bot.send_message(
             call.message.chat.id,
-            "💳 **Пополнение через CryptoBot**\n\n"
-            "💰 Актуальные курсы:\n"
-            "• USDT — 1 USDT = 85 руб\n"
-            "• Gram (GRAM) — 1 GRAM = 140 руб\n\n"
-            "📌 Минимальная сумма: 10 руб\n"
-            "📌 Максимальная сумма: 10000 руб\n\n"
-            "💳 Введите сумму в рублях:",
+            f"💳 **Пополнение через CryptoBot**\n\n"
+            f"💰 Актуальные курсы (CryptoBot):\n"
+            f"• USDT — 1 USDT = {rates['USDT']} руб\n"
+            f"• Gram (GRAM) — 1 GRAM = {rates['GRAM']} руб\n\n"
+            f"💳 **Твой доход:**\n"
+            f"• С USDT: +10 руб с каждой единицы\n"
+            f"• С GRAM: +15 руб с каждой единицы\n\n"
+            f"📌 Минимальная сумма: 10 руб\n"
+            f"📌 Максимальная сумма: 10000 руб\n\n"
+            f"💳 Введите сумму в рублях:",
             parse_mode="Markdown",
             reply_markup=markup
         )
@@ -1160,6 +1224,14 @@ def main_callback_handler(call):
         
         if category_path:
             text += f"📌 Категория: {category_path['platform']} → {category_path['category']} → {category_path['subcategory']}\n"
+        
+        # ДОБАВЛЯЕМ ТЕКСТ ПРО ПУБЛИЧНЫЙ КАНАЛ И ПОМОЩЬ
+        text += "\n" + "━" * 25 + "\n\n"
+        text += "📢 **Важно!**\n"
+        text += "🔗 Ссылка должна вести на **публичный канал**.\n"
+        text += "❓ В случае проблем с накруткой нажмите кнопку ❓ Помощь\n"
+        text += "в главном меню и вызовите администратора.\n"
+        text += "📞 Либо просто напишите администратору @nekrophoros\n"
         
         markup = types.InlineKeyboardMarkup(row_width=2)
         btn_buy = types.InlineKeyboardButton("🛒 Купить", callback_data=f"buy_service_{service_id}")
@@ -1382,7 +1454,9 @@ def main_callback_handler(call):
         
         bot.answer_callback_query(call.id)
         bot.edit_message_text(
-            "❓ **Помощь**\n\nЕсли есть проблема — вызови админа.",
+            "❓ **Помощь**\n\n"
+            "Если есть проблема — вызови админа.\n"
+            "📞 Либо просто напишите администратору @nekrophoros",
             call.message.chat.id,
             call.message.message_id,
             parse_mode="Markdown",
@@ -1749,15 +1823,17 @@ def main_callback_handler(call):
         btn1 = types.InlineKeyboardButton("💰 Пополнить баланс", callback_data="admin_add_balance")
         btn2 = types.InlineKeyboardButton("🪙 Начислить монеты", callback_data="admin_add_coins")
         btn3 = types.InlineKeyboardButton("💸 Списать деньги", callback_data="admin_spend")
-        btn4 = types.InlineKeyboardButton("📝 Отзывы", callback_data="admin_reviews")
-        btn5 = types.InlineKeyboardButton("👥 База данных", callback_data="admin_users")
-        btn6 = types.InlineKeyboardButton("📦 Заказы", callback_data="admin_orders")
-        btn7 = types.InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")
-        btn8 = types.InlineKeyboardButton("🎫 Промокоды", callback_data="admin_promocodes")
-        btn9 = types.InlineKeyboardButton("⚫ Чёрный список", callback_data="admin_blacklist")
-        btn10 = types.InlineKeyboardButton("📥 Экспорт данных", callback_data="admin_export")
-        btn11 = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
-        markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7, btn8, btn9, btn10, btn11)
+        btn4 = types.InlineKeyboardButton("💸 Списать монеты", callback_data="admin_spend_coins")
+        btn5 = types.InlineKeyboardButton("📝 Отзывы", callback_data="admin_reviews")
+        btn6 = types.InlineKeyboardButton("👥 База данных", callback_data="admin_users")
+        btn7 = types.InlineKeyboardButton("📦 Заказы", callback_data="admin_orders")
+        btn8 = types.InlineKeyboardButton("📊 Статистика", callback_data="admin_stats")
+        btn9 = types.InlineKeyboardButton("🎫 Промокоды", callback_data="admin_promocodes")
+        btn10 = types.InlineKeyboardButton("⚫ Чёрный список", callback_data="admin_blacklist")
+        btn11 = types.InlineKeyboardButton("📥 Экспорт данных", callback_data="admin_export")
+        btn12 = types.InlineKeyboardButton("➕ Добавить услугу", callback_data="admin_add_service")
+        btn13 = types.InlineKeyboardButton("🔙 Назад", callback_data="back_to_start")
+        markup.add(btn1, btn2, btn3, btn4, btn5, btn6, btn7, btn8, btn9, btn10, btn11, btn12, btn13)
         
         bot.answer_callback_query(call.id)
         bot.edit_message_text(
@@ -1796,6 +1872,17 @@ def main_callback_handler(call):
             parse_mode="Markdown"
         )
         bot.register_next_step_handler(msg, process_admin_spend)
+    
+    elif call.data == "admin_spend_coins":
+        if user_id != ADMIN_ID:
+            return
+        bot.answer_callback_query(call.id)
+        msg = bot.send_message(
+            call.message.chat.id,
+            "💸 Введи количество монет и ID пользователя для списания:\nФормат: `100 123456789`",
+            parse_mode="Markdown"
+        )
+        bot.register_next_step_handler(msg, process_admin_spend_coins)
     
     elif call.data == "admin_blacklist":
         if user_id != ADMIN_ID:
@@ -1994,7 +2081,6 @@ def main_callback_handler(call):
         cur.execute('SELECT SUM(coins) FROM users')
         total_coins = cur.fetchone()[0] or 0
         
-        # ТОП ПОЛЬЗОВАТЕЛЕЙ (по тратам)
         cur.execute('''
             SELECT user_id, username, total_spent 
             FROM users 
@@ -2003,7 +2089,6 @@ def main_callback_handler(call):
         ''')
         top_users = cur.fetchall()
         
-        # ТОП УСЛУГ
         cur.execute('''
             SELECT service_name, COUNT(*) as count, SUM(price) as total
             FROM orders 
@@ -2014,7 +2099,6 @@ def main_callback_handler(call):
         ''')
         top_services = cur.fetchall()
         
-        # ЧАСЫ ПИК
         cur.execute('''
             SELECT strftime('%H', date) as hour, COUNT(*) as count
             FROM orders 
@@ -2133,7 +2217,25 @@ def main_callback_handler(call):
             reply_markup=markup
         )
     
-    # ----- ЭКСПОРТ ДАННЫХ -----
+    elif call.data == "admin_add_service":
+        if user_id != ADMIN_ID:
+            return
+        
+        markup = types.InlineKeyboardMarkup()
+        btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="admin_panel")
+        markup.add(btn_back)
+        
+        bot.answer_callback_query(call.id)
+        bot.edit_message_text(
+            "➕ **Добавление услуги**\n\n"
+            "ℹ️ Добавление услуги будет доступно в следующем обновлении.\n\n"
+            "Сейчас можно только редактировать файл `SERVICES` в коде.",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown",
+            reply_markup=markup
+        )
+    
     elif call.data == "admin_export":
         if user_id != ADMIN_ID:
             return
@@ -2143,6 +2245,7 @@ def main_callback_handler(call):
         conn = sqlite3.connect('bot.db')
         cur = conn.cursor()
         
+        # Собираем все данные
         users = cur.execute('SELECT * FROM users').fetchall()
         orders = cur.execute('SELECT * FROM orders').fetchall()
         reviews = cur.execute('SELECT * FROM reviews').fetchall()
@@ -2151,23 +2254,49 @@ def main_callback_handler(call):
         
         conn.close()
         
-        data = {
-            "users": users,
-            "orders": orders,
-            "reviews": reviews,
-            "referrals": referrals,
-            "promocodes": promocodes,
-            "export_date": datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-        }
+        # Создаём TXT файл
+        date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         
-        json_data = json.dumps(data, default=str, indent=2)
-        file = io.BytesIO(json_data.encode('utf-8'))
-        file.name = "backup_data.json"
+        txt_content = "=" * 50 + "\n"
+        txt_content += "📊 ЭКСПОРТ ДАННЫХ NEKROKRUTKA\n"
+        txt_content += f"📅 Дата: {date}\n"
+        txt_content += "=" * 50 + "\n\n"
+        
+        txt_content += "👥 ПОЛЬЗОВАТЕЛИ:\n"
+        txt_content += "-" * 30 + "\n"
+        for user in users:
+            txt_content += f"ID: {user[0]} | Username: {user[1]} | Баланс: {user[2]} | Монеты: {user[3]} | Потрачено: {user[9]} | Дата: {user[6]}\n"
+        
+        txt_content += "\n📦 ЗАКАЗЫ:\n"
+        txt_content += "-" * 30 + "\n"
+        for order in orders:
+            txt_content += f"ID: {order[0]} | Пользователь: {order[1]} | Услуга: {order[3]} | Кол-во: {order[5]} | Цена: {order[6]} | Статус: {order[7]} | Дата: {order[9]}\n"
+        
+        txt_content += "\n⭐️ ОТЗЫВЫ:\n"
+        txt_content += "-" * 30 + "\n"
+        for review in reviews:
+            txt_content += f"ID: {review[0]} | Пользователь: {review[1]} | Оценка: {review[3]} | Текст: {review[4]} | Дата: {review[5]}\n"
+        
+        txt_content += "\n👥 РЕФЕРАЛЫ:\n"
+        txt_content += "-" * 30 + "\n"
+        for referral in referrals:
+            txt_content += f"Пригласитель: {referral[1]} | Приглашённый: {referral[2]} | Дата: {referral[3]}\n"
+        
+        txt_content += "\n🎫 ПРОМОКОДЫ:\n"
+        txt_content += "-" * 30 + "\n"
+        for promo in promocodes:
+            txt_content += f"Код: {promo[1]} | Тип: {promo[2]} | Сумма: {promo[3]} | Лимит: {promo[4]} | Использовано: {promo[5]}\n"
+        
+        txt_content += "\n" + "=" * 50 + "\n"
+        txt_content += "📥 КОНЕЦ ЭКСПОРТА\n"
+        
+        file = io.BytesIO(txt_content.encode('utf-8'))
+        file.name = "backup_data.txt"
         
         bot.send_document(
             call.message.chat.id,
             file,
-            caption=f"📥 **Экспорт данных**\n\nДата: {data['export_date']}"
+            caption=f"📥 **Экспорт данных**\n\n📅 Дата: {date}\n📊 Формат: TXT"
         )
     
     # ----- НАЗАД -----
@@ -2178,7 +2307,7 @@ def main_callback_handler(call):
         bot.answer_callback_query(call.id, "⚠️ Функция временно недоступна")
 
 # ==================================================
-# 9. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (ОБРАБОТЧИКИ СООБЩЕНИЙ)
+# 10. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==================================================
 def process_quantity(message):
     user_id = message.from_user.id
@@ -2294,6 +2423,7 @@ def process_link(message):
     conn = sqlite3.connect('bot.db')
     cur = conn.cursor()
     cur.execute('UPDATE users SET balance = balance - ? WHERE user_id = ?', (total_price, user_id))
+    cur.execute('UPDATE users SET total_spent = total_spent + ? WHERE user_id = ?', (total_price, user_id))
     service_name = get_service_name_by_id(service_id)
     cur.execute('''
         INSERT INTO orders (user_id, service_id, service_name, link, quantity, price, status, order_id, date, last_check)
@@ -2330,16 +2460,30 @@ def process_crypto_deposit(message):
         bot.send_message(message.chat.id, "❌ Введите число!")
         return
     
+    rates = get_crypto_rates()
+    
     markup = types.InlineKeyboardMarkup(row_width=2)
-    btn_usdt = types.InlineKeyboardButton("💵 USDT", callback_data=f"crypto_usdt_{amount_rub}")
-    btn_gram = types.InlineKeyboardButton("🟣 Gram", callback_data=f"crypto_gram_{amount_rub}")
+    btn_usdt = types.InlineKeyboardButton(
+        f"💵 USDT (1 USDT = {rates['USDT'] - 10} руб)",
+        callback_data=f"crypto_usdt_{amount_rub}"
+    )
+    btn_gram = types.InlineKeyboardButton(
+        f"🟣 Gram (1 GRAM = {rates['GRAM'] - 15} руб)",
+        callback_data=f"crypto_gram_{amount_rub}"
+    )
     btn_back = types.InlineKeyboardButton("🔙 Назад", callback_data="deposit")
     markup.add(btn_usdt, btn_gram, btn_back)
     
     bot.send_message(
         message.chat.id,
         f"💰 Сумма: {amount_rub:.2f} руб\n\n"
-        f"Выбери валюту для оплаты:",
+        f"💰 Актуальные курсы (CryptoBot):\n"
+        f"• USDT — 1 USDT = {rates['USDT']} руб\n"
+        f"• Gram (GRAM) — 1 GRAM = {rates['GRAM']} руб\n\n"
+        f"💳 **Твой доход:**\n"
+        f"• С USDT: +10 руб с каждой единицы\n"
+        f"• С GRAM: +15 руб с каждой единицы\n\n"
+        f"📌 Выбери валюту для оплаты:",
         reply_markup=markup
     )
 
@@ -2354,10 +2498,16 @@ def crypto_currency_selected(call):
         bot.answer_callback_query(call.id, "❌ CryptoBot не настроен!")
         return
     
+    rates = get_crypto_rates()
+    
     if currency == "USDT":
-        amount_crypto = amount_rub / 85
+        real_rate = rates["USDT"] - 10
+        amount_crypto = amount_rub / real_rate
+        currency_name = "USDT"
     elif currency == "GRAM":
-        amount_crypto = amount_rub / 140
+        real_rate = rates["GRAM"] - 15
+        amount_crypto = amount_rub / real_rate
+        currency_name = "GRAM"
     else:
         bot.answer_callback_query(call.id, "❌ Неизвестная валюта!")
         return
@@ -2374,7 +2524,11 @@ def crypto_currency_selected(call):
             "asset": currency,
             "amount": amount_crypto,
             "description": f"Пополнение баланса NekroKrutka на {amount_rub} руб.",
-            "payload": json.dumps({"user_id": user_id, "amount_rub": amount_rub})
+            "payload": json.dumps({
+                "user_id": user_id,
+                "amount_rub": amount_rub,
+                "real_rate": real_rate
+            })
         }
         
         response = requests.post(url, json=payload, headers=headers, timeout=30)
@@ -2395,8 +2549,9 @@ def crypto_currency_selected(call):
                 bot.edit_message_text(
                     f"💳 **Счёт создан!**\n\n"
                     f"💰 Сумма: {amount_rub:.2f} руб\n"
-                    f"💵 Валюта: {currency}\n"
-                    f"📊 К оплате: {amount_crypto} {currency}\n\n"
+                    f"💵 Валюта: {currency_name}\n"
+                    f"📊 К оплате: {amount_crypto} {currency_name}\n"
+                    f"📈 Курс: 1 {currency_name} = {real_rate:.2f} руб (с учётом дохода)\n\n"
                     f"1️⃣ Нажми 'Оплатить'\n"
                     f"2️⃣ Оплати через CryptoBot\n"
                     f"3️⃣ Нажми 'Проверить оплату' после оплаты\n\n"
@@ -2543,6 +2698,23 @@ def process_admin_spend(message):
         conn.commit()
         conn.close()
         bot.send_message(message.chat.id, f"✅ Списано {amount} руб. с пользователя {user_id}")
+    except:
+        bot.send_message(message.chat.id, "❌ Формат: `100 123456789`")
+
+def process_admin_spend_coins(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        parts = message.text.split()
+        coins = int(parts[0])
+        user_id = int(parts[1])
+        conn = sqlite3.connect('bot.db')
+        cur = conn.cursor()
+        cur.execute('UPDATE users SET coins = coins - ? WHERE user_id = ?', (coins, user_id))
+        conn.commit()
+        conn.close()
+        bot.send_message(message.chat.id, f"✅ Списано {coins} монет с пользователя {user_id}")
     except:
         bot.send_message(message.chat.id, "❌ Формат: `100 123456789`")
 
@@ -2779,7 +2951,7 @@ def back_to_start(call):
         bot.send_message(call.message.chat.id, text, parse_mode="Markdown", reply_markup=markup)
 
 # ==================================================
-# 10. ЗАПУСК
+# 11. ЗАПУСК
 # ==================================================
 if __name__ == "__main__":
     import threading
