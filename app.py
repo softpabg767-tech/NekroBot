@@ -1088,14 +1088,24 @@ def back_to_start(call):
 
 # ===== ЗАПУСК =====
 if __name__ == "__main__":
+    import threading
+
     print("🚀 Бот NekroKrutka запущен!")
     print(f"👤 Админ: {ADMIN_ID}")
     print(f"📱 Бот: @{BOT_USERNAME}")
     print(f"📢 Канал: {CHANNEL_ID}")
-    
+
     monitor_thread = threading.Thread(target=check_orders_status, daemon=True)
     monitor_thread.start()
     print("🔄 Мониторинг статусов запущен!")
-    
+
+    def run_bot():
+        bot.infinity_polling()
+
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    print("🤖 Бот запущен в режиме polling")
+
     port = int(os.environ.get("PORT", 5000))
     flask_app.run(host='0.0.0.0', port=port)
+    
